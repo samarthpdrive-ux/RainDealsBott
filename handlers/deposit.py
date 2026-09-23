@@ -97,7 +97,7 @@ BINANCE_PAY_NETWORK = "BINANCE"
 
 TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 UTR_RE = re.compile(r"^\d{12}$")
-TXN_ID_RE = re.compile(r"^[A-Za-z]{3,10}\d{6,15}$")
+TXN_ID_RE = re.compile(r"^(?:FMPIB)?\d{8,15}$", re.IGNORECASE)
 ORDER_ID_RE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 PROMO_CODE_RE = re.compile(r"^[A-Za-z0-9]{4,20}$")
 
@@ -524,9 +524,12 @@ async def _show_deposits_page(callback: CallbackQuery, page: int = 0):
 # ║              VALIDATION HELPERS                             ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-def _valid_upi_reference(value: str) -> bool:
-    return bool(UTR_RE.match(value) or TXN_ID_RE.match(value))
-
+def _valid_upi_reference(txid: str) -> bool:
+    val = (txid or "").strip()
+    return bool(
+        UTR_RE.fullmatch(val)
+        or TXN_ID_RE.fullmatch(val)
+    )
 
 def _valid_order_id(value: str) -> bool:
     return bool(ORDER_ID_RE.match(value))
@@ -669,7 +672,6 @@ async def deposit_menu(callback: CallbackQuery):
         f"{_divider('─', 28)}\n\n"
         f"💡 <i>All deposits are verified automatically</i>"
     )
-
 
     await show(
         callback,
@@ -1386,7 +1388,8 @@ async def process_txid(message: Message, state: FSMContext):
             await update_card(
                 message, None,
                 (
-                    f"⚠️ <b>AMOUNT MISMATCH</b>\n\n"                    f"<b>You sent less than the required amount.</b>\n\n"
+                    f"⚠️ <b>AMOUNT MISMATCH</b>\n\n"
+                    f"<b>You sent less than the required amount.</b>\n\n"
                     f"{_divider('─', 28)}\n\n"
                     f"📋 <b>Required:</b> {result_info.get('requested')}\n"
                     f"📥 <b>Received:</b> {result_info.get('received')}\n"
@@ -1417,7 +1420,8 @@ async def process_txid(message: Message, state: FSMContext):
             await update_card(
                 message, None,
                 (
-                    f"❌ <b>VERIFICATION FAILED</b>\n\n"                    f"<b>We couldn't verify your payment.</b>\n\n"
+                    f"❌ <b>VERIFICATION FAILED</b>\n\n"
+                    f"<b>We couldn't verify your payment.</b>\n\n"
                     f"{_divider('─', 28)}\n\n"
                     f"🆔 Deposit: <code>#{deposit_id}</code>\n"
                     f"🔑 Ref: <code>{txid[:24]}...</code>\n\n"
