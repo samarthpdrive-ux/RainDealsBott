@@ -51,7 +51,9 @@ import email
 import hashlib
 import hmac
 import imaplib
+import json
 import logging
+import os
 import re
 import time as time_module
 
@@ -75,9 +77,7 @@ from models.user import User
 
 import config
 
-
 logger = logging.getLogger(__name__)
-
 
 # ================================================================
 # CONFIGURATION
@@ -99,7 +99,6 @@ try:
 except (TypeError, ValueError):
     BINANCE_LOOKBACK_DAYS = 7
 
-
 # ================================================================
 # WALLET ADDRESSES
 # ================================================================
@@ -111,7 +110,6 @@ BEP20_ADDRESS = str(
 POLYGON_ADDRESS = str(
     getattr(config, "POLYGON_ADDRESS", "") or ""
 ).strip().lower()
-
 
 # ================================================================
 # RPC CONFIGURATION
@@ -163,7 +161,6 @@ def _normalise_rpc_urls(value) -> list[str]:
 BSC_RPC_URLS = _normalise_rpc_urls(BSC_RPC_URLS)
 POLYGON_RPC_URLS = _normalise_rpc_urls(POLYGON_RPC_URLS)
 
-
 # ================================================================
 # CONFIRMATIONS
 # ================================================================
@@ -177,7 +174,6 @@ RPC_CONFIRMATIONS = {
     ),
 }
 
-
 # ================================================================
 # RPC TIMEOUT
 # ================================================================
@@ -185,7 +181,6 @@ RPC_CONFIRMATIONS = {
 RPC_TIMEOUT = int(
     getattr(config, "RPC_TIMEOUT_SECONDS", 10)
 )
-
 
 # ================================================================
 # RPC CACHE
@@ -196,7 +191,6 @@ RPC_CACHE_TTL = int(
 )
 
 _rpc_cache = {}
-
 
 # ================================================================
 # TOKEN CONTRACTS
@@ -214,7 +208,6 @@ OFFICIAL_CONTRACTS = {
         "USDC": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
     },
 }
-
 
 # ================================================================
 # TOKEN DECIMALS
@@ -276,7 +269,6 @@ CHAINS = {
     ),
 }
 
-
 # ================================================================
 # UPI
 # ================================================================
@@ -309,10 +301,9 @@ IMAP_LOOKBACK_DAYS = int(
 
 MAX_EMAILS_TO_SCAN = int(
     getattr(config,
-    "UPI_MAX_EMAILS_TO_SCAN",
-    40)
+            "UPI_MAX_EMAILS_TO_SCAN",
+            40)
 )
-
 
 # ================================================================
 # BINANCE PAY
@@ -349,7 +340,6 @@ try:
 except (TypeError, ValueError):
     BINANCE_PAY_LOOKBACK_DAYS = 7
 
-
 # ================================================================
 # DEPOSIT SETTINGS
 # ================================================================
@@ -367,7 +357,6 @@ try:
 except (InvalidOperation, ValueError):
     AMOUNT_TOLERANCE = Decimal("0.000001")
 
-
 try:
     MAX_CHECK_ATTEMPTS = int(
         getattr(
@@ -378,7 +367,6 @@ try:
     )
 except (TypeError, ValueError):
     MAX_CHECK_ATTEMPTS = 180
-
 
 CHECK_INTERVAL = int(
     getattr(
@@ -398,7 +386,6 @@ MIN_DEPOSIT_USD = Decimal(
     )
 )
 
-
 # ================================================================
 # UPI REGEX
 # ================================================================
@@ -406,7 +393,8 @@ MIN_DEPOSIT_USD = Decimal(
 UTR_RE = re.compile(r"^\d{12}$")
 
 TXN_ID_RE = re.compile(
-    r"^[A-Za-z]{3,10}\d{6,15}$"
+    r"^(?:FMPIB)?\d{8,15}$",
+    re.IGNORECASE,
 )
 
 UTR_SPECIFIC_RE = re.compile(
@@ -429,7 +417,8 @@ UTR_FALLBACK_RE = re.compile(
 )
 
 TXN_ID_FALLBACK_RE = re.compile(
-    r"\b([A-Za-z]{3,10}\d{6,15})\b"
+    r"\b((?:FMPIB)?\d{8,15})\b",
+    re.IGNORECASE,
 )
 
 AMOUNT_RE = re.compile(
@@ -447,16 +436,13 @@ RECEIVED_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 TX_HASH_RE = re.compile(
     r"^0x[0-9a-fA-F]{64}$"
 )
 
-
 ORDER_ID_RE = re.compile(
     r"^[A-Za-z0-9]{8,32}$"
 )
-
 
 # ================================================================
 # ERC20 TRANSFER EVENT
@@ -466,7 +452,6 @@ TRANSFER_TOPIC = Web3.keccak(
     text="Transfer(address,address,uint256)"
 ).hex().lower()
 
-
 # ================================================================
 # STATE
 # ================================================================
@@ -475,9 +460,7 @@ _check_attempts: dict[int, int] = {}
 
 _binance_client: Optional[Client] = None
 
-# Binance may reject all API requests from the server's jurisdiction.  This is
-# an account/eligibility restriction, not a temporary network failure, so keep
-# it in memory and do not retry every deposit-check interval.
+# Binance may reject all API requests from the server's jurisdiction.
 _binance_access_restricted = False
 
 # Avoid repeating the same manual-review warning on every checker cycle.
@@ -489,9 +472,9 @@ def _is_binance_location_restriction(error) -> bool:
     message = str(error or "").lower()
 
     return (
-        "restricted location" in message
-        or "eligibility" in message
-        or "service unavailable from a restricted" in message
+            "restricted location" in message
+            or "eligibility" in message
+            or "service unavailable from a restricted" in message
     )
 
 
@@ -519,25 +502,32 @@ def _mark_binance_access_restricted(error, context: str) -> None:
 
 def valid_hash(tx_hash: str) -> bool:
     return (
-        isinstance(tx_hash, str)
-        and bool(TX_HASH_RE.fullmatch(tx_hash.strip()))
+            isinstance(tx_hash, str)
+            and bool(TX_HASH_RE.fullmatch(tx_hash.strip()))
     )
 
 
 def valid_order_id(order_id: str) -> bool:
     return (
-        isinstance(order_id, str)
-        and bool(ORDER_ID_RE.fullmatch(order_id.strip()))
+            isinstance(order_id, str)
+            and bool(ORDER_ID_RE.fullmatch(order_id.strip()))
     )
+
+
+def _normalize_upi_id(val: str) -> str:
+    val = (val or "").strip()
+    if val.isdigit() and len(val) != 12:
+        return f"FMPIB{val}"
+    return val.upper()
 
 
 def valid_utr(utr: str) -> bool:
     return (
-        isinstance(utr, str)
-        and bool(
-            UTR_RE.fullmatch(utr)
-            or TXN_ID_RE.fullmatch(utr)
-        )
+            isinstance(utr, str)
+            and bool(
+        UTR_RE.fullmatch(utr.strip())
+        or TXN_ID_RE.fullmatch(utr.strip())
+    )
     )
 
 
@@ -572,14 +562,13 @@ def _get_binance_client() -> Optional[Client]:
             ]
 
             client.timestamp_offset = (
-                server_time
-                - int(time_module.time() * 1000)
+                    server_time
+                    - int(time_module.time() * 1000)
             )
 
         except Exception as exc:
 
             if _is_binance_location_restriction(exc):
-
                 _mark_binance_access_restricted(
                     exc,
                     "server-time initialization",
@@ -645,8 +634,8 @@ def _get_web3(chain: Chain) -> Optional[Web3]:
         created = cached.get("time", 0)
 
         if (
-            time_module.time() - created
-            < RPC_CACHE_TTL
+                time_module.time() - created
+                < RPC_CACHE_TTL
         ):
             return cached["web3"]
 
@@ -704,12 +693,12 @@ def _get_web3(chain: Chain) -> Optional[Web3]:
 # ================================================================
 
 def _decode_transfer_logs(
-    w3: Web3,
-    receipt,
-    chain: Chain,
-    tx_hash: str,
-    expected_recipient: str,
-    expected_amount: Optional[Decimal],
+        w3: Web3,
+        receipt,
+        chain: Chain,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: Optional[Decimal],
 ):
     """
     Find the ERC20 Transfer event corresponding to
@@ -719,7 +708,7 @@ def _decode_transfer_logs(
     """
 
     expected_recipient = (
-        expected_recipient or ""
+            expected_recipient or ""
     ).lower()
 
     transfers = []
@@ -751,13 +740,13 @@ def _decode_transfer_logs(
                 continue
 
             from_address = (
-                "0x"
-                + topics[1].hex()[-40:]
+                    "0x"
+                    + topics[1].hex()[-40:]
             ).lower()
 
             to_address = (
-                "0x"
-                + topics[2].hex()[-40:]
+                    "0x"
+                    + topics[2].hex()[-40:]
             ).lower()
 
             if to_address != expected_recipient:
@@ -820,18 +809,18 @@ def _decode_transfer_logs(
                 continue
 
             actual_amount = (
-                Decimal(
-                    transfer["raw_amount"]
-                )
-                / (
-                    Decimal(10)
-                    ** decimals
-                )
+                    Decimal(
+                        transfer["raw_amount"]
+                    )
+                    / (
+                            Decimal(10)
+                            ** decimals
+                    )
             )
 
             if actual_amount >= (
-                expected_amount
-                - AMOUNT_TOLERANCE
+                    expected_amount
+                    - AMOUNT_TOLERANCE
             ):
                 transfer[
                     "amount"
@@ -857,7 +846,6 @@ def _decode_transfer_logs(
     for name, address in chain.contracts.items():
 
         if address.lower() == contract:
-
             coin = name
 
             decimals = TOKEN_DECIMALS[
@@ -867,13 +855,13 @@ def _decode_transfer_logs(
             transfer["coin"] = coin
 
             transfer["amount"] = (
-                Decimal(
-                    transfer["raw_amount"]
-                )
-                / (
-                    Decimal(10)
-                    ** decimals
-                )
+                    Decimal(
+                        transfer["raw_amount"]
+                    )
+                    / (
+                            Decimal(10)
+                            ** decimals
+                    )
             )
 
             return transfer
@@ -882,9 +870,9 @@ def _decode_transfer_logs(
 
 
 def _verify_rpc_transaction_sync(
-    chain: Chain,
-    tx_hash: str,
-    requested_amount: Optional[Decimal],
+        chain: Chain,
+        tx_hash: str,
+        requested_amount: Optional[Decimal],
 ):
     """
     Complete on-chain verification.
@@ -946,7 +934,6 @@ def _verify_rpc_transaction_sync(
         )
 
         if status != 1:
-
             logger.warning(
                 "[%s] TX reverted: %s",
                 chain.name,
@@ -968,9 +955,9 @@ def _verify_rpc_transaction_sync(
         )
 
         confirmations = (
-            latest_block
-            - tx_block
-            + 1
+                latest_block
+                - tx_block
+                + 1
         )
 
         # --------------------------------------------------------
@@ -978,11 +965,10 @@ def _verify_rpc_transaction_sync(
         # --------------------------------------------------------
 
         expected_recipient = (
-            chain.address or ""
+                chain.address or ""
         ).lower()
 
         if not expected_recipient:
-
             logger.error(
                 "[%s] Deposit address not configured",
                 chain.name,
@@ -1004,7 +990,6 @@ def _verify_rpc_transaction_sync(
         )
 
         if transfer is None:
-
             logger.info(
                 "[%s] No valid token transfer found: %s",
                 chain.name,
@@ -1023,7 +1008,7 @@ def _verify_rpc_transaction_sync(
         )
 
         confirmed = (
-            confirmations >= required
+                confirmations >= required
         )
 
         result = {
@@ -1075,9 +1060,9 @@ def _verify_rpc_transaction_sync(
 
 
 async def verify_rpc_transaction(
-    chain: Chain,
-    tx_hash: str,
-    requested_amount: Optional[Decimal],
+        chain: Chain,
+        tx_hash: str,
+        requested_amount: Optional[Decimal],
 ):
     return await asyncio.to_thread(
         _verify_rpc_transaction_sync,
@@ -1092,9 +1077,8 @@ async def verify_rpc_transaction(
 # ================================================================
 
 def _fetch_binance_deposits_sync(
-    binance_network: str,
+        binance_network: str,
 ) -> list[dict]:
-
     client = _get_binance_client()
 
     if client is None:
@@ -1106,12 +1090,12 @@ def _fetch_binance_deposits_sync(
 
     # Keep Binance request window reasonably small.
     start_time = (
-        end_time
-        - BINANCE_LOOKBACK_DAYS
-        * 24
-        * 60
-        * 60
-        * 1000
+            end_time
+            - BINANCE_LOOKBACK_DAYS
+            * 24
+            * 60
+            * 60
+            * 1000
     )
 
     all_deposits = []
@@ -1137,7 +1121,6 @@ def _fetch_binance_deposits_sync(
         except BinanceAPIException as exc:
 
             if _is_binance_location_restriction(exc):
-
                 _mark_binance_access_restricted(
                     exc,
                     "deposit-history request",
@@ -1155,7 +1138,6 @@ def _fetch_binance_deposits_sync(
         except Exception as exc:
 
             if _is_binance_location_restriction(exc):
-
                 _mark_binance_access_restricted(
                     exc,
                     "deposit-history request",
@@ -1174,9 +1156,8 @@ def _fetch_binance_deposits_sync(
 
 
 async def _fetch_binance_matches(
-    chain: Chain,
+        chain: Chain,
 ) -> dict[str, dict]:
-
     if not chain.binance_network:
         return {}
 
@@ -1190,9 +1171,9 @@ async def _fetch_binance_matches(
     for row in rows:
 
         tx_id = (
-            row.get("txId")
-            or row.get("txid")
-            or ""
+                row.get("txId")
+                or row.get("txid")
+                or ""
         ).lower()
 
         if tx_id:
@@ -1206,10 +1187,10 @@ async def _fetch_binance_matches(
 # ================================================================
 
 def _match_binance_row(
-    chain: Chain,
-    tx_hash: str,
-    matches: dict[str, dict],
-    rpc_result: dict,
+        chain: Chain,
+        tx_hash: str,
+        matches: dict[str, dict],
+        rpc_result: dict,
 ):
     row = matches.get(
         tx_hash.lower()
@@ -1230,7 +1211,6 @@ def _match_binance_row(
         status = -1
 
     if status != 1:
-
         logger.info(
             "[%s] Binance deposit not successful yet | tx=%s",
             chain.name,
@@ -1256,7 +1236,6 @@ def _match_binance_row(
     ).upper()
 
     if binance_coin != rpc_coin:
-
         logger.warning(
             "[%s] COIN MISMATCH | Binance=%s RPC=%s",
             chain.name,
@@ -1281,11 +1260,10 @@ def _match_binance_row(
     ).upper()
 
     if (
-        row_network
-        and expected_network
-        and row_network != expected_network
+            row_network
+            and expected_network
+            and row_network != expected_network
     ):
-
         logger.warning(
             "[%s] NETWORK MISMATCH | Binance=%s expected=%s",
             chain.name,
@@ -1305,15 +1283,14 @@ def _match_binance_row(
     ).lower()
 
     expected_address = (
-        chain.address or ""
+            chain.address or ""
     ).lower()
 
     if (
-        binance_address
-        and expected_address
-        and binance_address != expected_address
+            binance_address
+            and expected_address
+            and binance_address != expected_address
     ):
-
         logger.warning(
             "[%s] ADDRESS MISMATCH",
             chain.name,
@@ -1347,10 +1324,9 @@ def _match_binance_row(
     )
 
     if abs(
-        binance_amount
-        - rpc_amount
+            binance_amount
+            - rpc_amount
     ) > AMOUNT_TOLERANCE:
-
         logger.warning(
             "[%s] AMOUNT MISMATCH | Binance=%s RPC=%s",
             chain.name,
@@ -1388,9 +1364,9 @@ def _match_binance_row(
 # ================================================================
 
 async def verify_transaction(
-    chain: Chain,
-    tx_hash: str,
-    requested_amount: Optional[Decimal] = None,
+        chain: Chain,
+        tx_hash: str,
+        requested_amount: Optional[Decimal] = None,
 ):
     """
     HYBRID:
@@ -1430,7 +1406,6 @@ async def verify_transaction(
     # ------------------------------------------------------------
 
     if not rpc_result["confirmed"]:
-
         logger.info(
             "[%s] Waiting confirmations | %s/%s",
             chain.name,
@@ -1458,7 +1433,6 @@ async def verify_transaction(
     )
 
     if binance_result is None:
-
         logger.info(
             "[%s] RPC valid but Binance deposit "
             "not available yet | tx=%s",
@@ -1507,7 +1481,6 @@ async def verify_transaction(
 # ================================================================
 
 def _decode_text(text) -> str:
-
     if text is None:
         return ""
 
@@ -1530,20 +1503,19 @@ def _decode_text(text) -> str:
 
 
 def _get_body(msg) -> str:
-
     if msg.is_multipart():
 
         for part in msg.walk():
 
             if (
-                part.get_content_type()
-                == "text/plain"
-                and "attachment"
-                not in str(
-                    part.get(
-                        "Content-Disposition"
-                    )
+                    part.get_content_type()
+                    == "text/plain"
+                    and "attachment"
+                    not in str(
+                part.get(
+                    "Content-Disposition"
                 )
+            )
             ):
 
                 payload = part.get_payload(
@@ -1551,7 +1523,6 @@ def _get_body(msg) -> str:
                 )
 
                 if payload:
-
                     return payload.decode(
                         errors="ignore"
                     )
@@ -1570,10 +1541,9 @@ def _get_body(msg) -> str:
 
 
 def _extract_amount(
-    text: str,
-    near_pos: Optional[int] = None,
+        text: str,
+        near_pos: Optional[int] = None,
 ):
-
     if not text:
         return None
 
@@ -1648,9 +1618,8 @@ def _extract_amount(
 
 
 def _extract_upi_identifiers(
-    text: str,
+        text: str,
 ) -> dict:
-
     result = {
         "utr": None,
         "txn_id": None,
@@ -1676,6 +1645,8 @@ def _extract_upi_identifiers(
     if txn_match:
         result["txn_id"] = (
             txn_match.group(1)
+            if txn_match.group(1).upper().startswith("FMPIB")
+            else "FMPIB" + txn_match.group(1)
         )
 
     if not result["utr"]:
@@ -1698,6 +1669,8 @@ def _extract_upi_identifiers(
         if fallback:
             result["txn_id"] = (
                 fallback.group(1)
+                if fallback.group(1).upper().startswith("FMPIB")
+                else "FMPIB" + fallback.group(1)
             )
 
     pos = (
@@ -1719,11 +1692,10 @@ def _extract_upi_identifiers(
 
 
 def _fetch_famapp_matches() -> dict:
-
     if (
-        not IMAP_EMAIL
-        or not IMAP_APP_PASSWORD
-        or not FAMAPP_SENDER_EMAIL
+            not IMAP_EMAIL
+            or not IMAP_APP_PASSWORD
+            or not FAMAPP_SENDER_EMAIL
     ):
         return {}
 
@@ -1744,10 +1716,10 @@ def _fetch_famapp_matches() -> dict:
         mail.select("INBOX")
 
         since = (
-            datetime.now()
-            - timedelta(
-                days=IMAP_LOOKBACK_DAYS
-            )
+                datetime.now()
+                - timedelta(
+            days=IMAP_LOOKBACK_DAYS
+        )
         ).strftime("%d-%b-%Y")
 
         status, data = mail.search(
@@ -1762,8 +1734,8 @@ def _fetch_famapp_matches() -> dict:
         ids = data[0].split()
 
         ids = ids[
-            -MAX_EMAILS_TO_SCAN:
-        ]
+              -MAX_EMAILS_TO_SCAN:
+              ]
 
         if not ids:
             return {}
@@ -1779,8 +1751,8 @@ def _fetch_famapp_matches() -> dict:
         for item in msg_data:
 
             if not isinstance(
-                item,
-                tuple,
+                    item,
+                    tuple,
             ):
                 continue
 
@@ -1843,19 +1815,20 @@ def _fetch_famapp_matches() -> dict:
 
 
 def _match_upi(
-    deposit: Deposit,
-    matches: dict,
+        deposit: Deposit,
+        matches: dict,
 ):
-
     user_input = (
-        deposit.tx_hash or ""
+            deposit.tx_hash or ""
     ).strip()
 
     if not valid_utr(user_input):
         return False
 
+    norm_input = _normalize_upi_id(user_input)
+
     payment = matches.get(
-        user_input.upper()
+        norm_input
     )
 
     if payment is None:
@@ -1867,8 +1840,8 @@ def _match_upi(
         "amount": payment["amount"],
         "inr_amount": payment["amount"],
         "utr": (
-            payment.get("utr")
-            or user_input
+                payment.get("utr")
+                or norm_input
         ),
         "txn_id": payment.get(
             "txn_id"
@@ -1877,9 +1850,8 @@ def _match_upi(
 
 
 async def verify_upi(
-    deposit: Deposit,
+        deposit: Deposit,
 ):
-
     try:
 
         matches = await asyncio.to_thread(
@@ -1905,10 +1877,9 @@ async def verify_upi(
 # ================================================================
 
 def _sapi_sign(
-    params: dict,
-    secret: str,
+        params: dict,
+        secret: str,
 ) -> str:
-
     query = "&".join(
         f"{k}={v}"
         for k, v in params.items()
@@ -1922,12 +1893,11 @@ def _sapi_sign(
 
 
 def _query_pay_trade_history_sync(
-    lookback_days: int,
+        lookback_days: int,
 ):
-
     if (
-        not BINANCE_API_KEY
-        or not BINANCE_API_SECRET
+            not BINANCE_API_KEY
+            or not BINANCE_API_SECRET
     ):
         return []
 
@@ -1945,7 +1915,6 @@ def _query_pay_trade_history_sync(
     except Exception as exc:
 
         if _is_binance_location_restriction(exc):
-
             _mark_binance_access_restricted(
                 exc,
                 "Binance Pay server-time request",
@@ -1956,12 +1925,12 @@ def _query_pay_trade_history_sync(
     end_time = server_time
 
     start_time = (
-        end_time
-        - lookback_days
-        * 24
-        * 60
-        * 60
-        * 1000
+            end_time
+            - lookback_days
+            * 24
+            * 60
+            * 60
+            * 1000
     )
 
     params = {
@@ -1991,7 +1960,6 @@ def _query_pay_trade_history_sync(
         if response.status_code != 200:
 
             if _is_binance_location_restriction(response.text):
-
                 _mark_binance_access_restricted(
                     response.text,
                     "Binance Pay transaction-history request",
@@ -2027,10 +1995,9 @@ def _query_pay_trade_history_sync(
 
 
 def _match_pay_transaction(
-    order_id: str,
-    rows: list[dict],
+        order_id: str,
+        rows: list[dict],
 ):
-
     for row in rows:
 
         matched = any(
@@ -2067,9 +2034,8 @@ def _match_pay_transaction(
 
 
 async def verify_binance_pay_order(
-    order_id: str,
+        order_id: str,
 ):
-
     rows = await asyncio.to_thread(
         _query_pay_trade_history_sync,
         BINANCE_PAY_LOOKBACK_DAYS,
@@ -2115,33 +2081,84 @@ async def verify_binance_pay_order(
 
 
 # ================================================================
-# INR / UPI CONVERSION (CurrencyAPI Multi-Key Integration)
+# INR / UPI CONVERSION (Render Hosted Service Integration)
 # ================================================================
 
 _usdt_inr_rate_cache = {
     "rate": None,
     "last_updated": None,
-    "ttl_seconds": 1200,  # Matches CURRENCY_RATE_CACHE_MINUTES (20 mins)
+    "ttl_seconds": 180,  # Refresh cache every 3 minutes
 }
 
 _current_api_key_index = 0
 
+
 def _get_usdt_inr_rate() -> Decimal:
+    """
+    Fetches the live exchange rate from samarthpricefetch.onrender.com.
+    Falls back sequentially to open exchange APIs and config defaults.
+    """
     global _current_api_key_index
     now = time_module.time()
     cache = _usdt_inr_rate_cache
 
+    # 1. Return cached rate if fresh
     if (
-        cache["rate"] is not None
-        and cache["last_updated"] is not None
-        and (now - cache["last_updated"]) < cache["ttl_seconds"]
+            cache["rate"] is not None
+            and cache["last_updated"] is not None
+            and (now - cache["last_updated"]) < cache["ttl_seconds"]
     ):
         return cache["rate"]
 
+    # 2. Try primary live fetcher service hosted on Render
+    render_service_url = getattr(
+        config,
+        "RENDER_RATE_FETCHER_URL",
+        "https://samarthpricefetch.onrender.com/"
+    )
+
+    try:
+        response = requests.get(
+            render_service_url,
+            headers={"Accept": "text/html,application/json"},
+            timeout=8
+        )
+        if response.status_code == 200:
+            text = response.text
+
+            # Try parsing raw JSON response
+            try:
+                json_data = json.loads(text)
+                if "rate" in json_data:
+                    rate_val = float(json_data["rate"])
+                    if rate_val > 0:
+                        rate = Decimal(str(rate_val))
+                        cache["rate"] = rate
+                        cache["last_updated"] = now
+                        logger.info("Fetched USD/INR rate from Render service JSON: %s", rate)
+                        return rate
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+            # Try parsing HTML output from rendered webpage
+            match = re.search(r'₹\s*([\d\.]+)', text)
+            if not match:
+                match = re.search(r'([\d\.]+)\s*INR', text, re.IGNORECASE)
+            if match:
+                rate_val = float(match.group(1))
+                if 70.0 < rate_val < 150.0:
+                    rate = Decimal(str(rate_val))
+                    cache["rate"] = rate
+                    cache["last_updated"] = now
+                    logger.info("Fetched USD/INR rate from Render service HTML: %s", rate)
+                    return rate
+    except Exception as exc:
+        logger.warning("Render rate fetcher service unavailable: %s", exc)
+
+    # 3. Try CurrencyAPI keys if configured
     api_keys = getattr(config, "CURRENCY_API_KEYS", [])
     base_url = getattr(config, "CURRENCY_API_URL", "https://api.currencyapi.com/v3/latest")
-    
-    # Try CurrencyAPI keys first if available
+
     if api_keys:
         num_keys = len(api_keys)
         for _ in range(num_keys):
@@ -2156,12 +2173,12 @@ def _get_usdt_inr_rate() -> Decimal:
                     },
                     timeout=getattr(config, "CURRENCY_REQUEST_TIMEOUT", 10)
                 )
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     inr_data = data.get("data", {}).get("INR", {})
                     rate_val = inr_data.get("value")
-                    
+
                     if rate_val:
                         rate = Decimal(str(rate_val))
                         if rate > 0:
@@ -2172,11 +2189,39 @@ def _get_usdt_inr_rate() -> Decimal:
                     _current_api_key_index = (_current_api_key_index + 1) % num_keys
             except Exception:
                 pass
-            
+
             if getattr(config, "CURRENCY_ROTATE_KEYS_ON_ERROR", True):
                 _current_api_key_index = (_current_api_key_index + 1) % num_keys
 
-    # Fallback to Binance ticker if CurrencyAPI fails
+    # 4. Try Free Open Rates API (open.er-api.com)
+    try:
+        response = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
+        if response.status_code == 200:
+            rate_val = response.json().get("rates", {}).get("INR")
+            if rate_val:
+                rate = Decimal(str(rate_val))
+                if rate > 0:
+                    cache["rate"] = rate
+                    cache["last_updated"] = now
+                    return rate
+    except Exception:
+        pass
+
+    # 5. Try Frankfurter API
+    try:
+        response = requests.get("https://api.frankfurter.app/latest?from=USD&to=INR", timeout=5)
+        if response.status_code == 200:
+            rate_val = response.json().get("rates", {}).get("INR")
+            if rate_val:
+                rate = Decimal(str(rate_val))
+                if rate > 0:
+                    cache["rate"] = rate
+                    cache["last_updated"] = now
+                    return rate
+    except Exception:
+        pass
+
+    # 6. Fallback to Binance ticker
     client = _get_binance_client()
     if client is not None:
         try:
@@ -2188,12 +2233,13 @@ def _get_usdt_inr_rate() -> Decimal:
         except Exception:
             pass
 
-    return Decimal(str(getattr(config, "UPI_USDT_INR_RATE", 95.0)))
+    # 7. Final static configuration fallback
+    return Decimal(str(getattr(config, "UPI_USDT_INR_RATE", 95.85)))
 
 
 def convert_inr_to_usdt(
-    inr_amount: Decimal,
-    rate: Optional[Decimal] = None,
+        inr_amount: Decimal,
+        rate: Optional[Decimal] = None,
 ) -> Decimal:
     """Convert INR using one verified rate snapshot and retain accounting precision."""
     rate = rate if rate is not None else _get_usdt_inr_rate()
@@ -2211,14 +2257,13 @@ def convert_inr_to_usdt(
 # ================================================================
 
 def credit_user(
-    db,
-    deposit: Deposit,
-    credited_amount: Decimal,
-    requested_amount: Optional[Decimal],
-    inr_amount=None,
-    usdt_inr_rate=None,
+        db,
+        deposit: Deposit,
+        credited_amount: Decimal,
+        requested_amount: Optional[Decimal],
+        inr_amount=None,
+        usdt_inr_rate=None,
 ) -> bool:
-
     user = (
         db.query(User)
         .filter(
@@ -2265,10 +2310,9 @@ def credit_user(
     )
 
     if hasattr(
-        user,
-        "total_deposit",
+            user,
+            "total_deposit",
     ):
-
         user.total_deposit += float(
             credited_amount
         )
@@ -2304,15 +2348,14 @@ def credit_user(
 # ================================================================
 
 def _record_pending_attempt(
-    deposit_id: int,
+        deposit_id: int,
 ) -> int:
-
     count = (
-        _check_attempts.get(
-            deposit_id,
-            0,
-        )
-        + 1
+            _check_attempts.get(
+                deposit_id,
+                0,
+            )
+            + 1
     )
 
     _check_attempts[
@@ -2323,9 +2366,8 @@ def _record_pending_attempt(
 
 
 def _clear_pending_attempts(
-    deposit_id: int,
+        deposit_id: int,
 ):
-
     _check_attempts.pop(
         deposit_id,
         None,
@@ -2344,11 +2386,10 @@ DELETE_FAILED_DEPOSITS = getattr(
 
 
 def _finalize_failed(
-    db,
-    deposit: Deposit,
-    reason: str,
+        db,
+        deposit: Deposit,
+        reason: str,
 ):
-
     if DELETE_FAILED_DEPOSITS:
         db.delete(deposit)
     else:
@@ -2368,11 +2409,10 @@ def _finalize_failed(
 
 
 def _fail_deposit(
-    db,
-    deposit_id: int,
-    reason: str,
+        db,
+        deposit_id: int,
+        reason: str,
 ):
-
     try:
 
         dep = db.get(
@@ -2381,14 +2421,13 @@ def _fail_deposit(
         )
 
         if (
-            dep
-            and dep.status
-            not in (
+                dep
+                and dep.status
+                not in (
                 "completed",
                 "failed",
-            )
+        )
         ):
-
             _finalize_failed(
                 db,
                 dep,
@@ -2411,11 +2450,10 @@ def _fail_deposit(
 # ================================================================
 
 async def verify_deposit(
-    deposit_or_id,
-    upi_matches=None,
-    result_info=None,
+        deposit_or_id,
+        upi_matches=None,
+        result_info=None,
 ):
-
     db = SessionLocal()
 
     try:
@@ -2435,7 +2473,6 @@ async def verify_deposit(
         )
 
         if deposit is None:
-
             _clear_pending_attempts(
                 deposit_id
             )
@@ -2447,17 +2484,16 @@ async def verify_deposit(
         # --------------------------------------------------------
 
         if deposit.status in (
-            "completed",
-            "failed",
+                "completed",
+                "failed",
         ):
-
             _clear_pending_attempts(
                 deposit.id
             )
 
             return (
-                deposit.status
-                == "completed"
+                    deposit.status
+                    == "completed"
             )
 
         # --------------------------------------------------------
@@ -2476,8 +2512,8 @@ async def verify_deposit(
                 requested_amount = None
 
         except (
-            InvalidOperation,
-            TypeError,
+                InvalidOperation,
+                TypeError,
         ):
 
             requested_amount = None
@@ -2493,9 +2529,8 @@ async def verify_deposit(
         if network == UPI_NETWORK:
 
             if not valid_utr(
-                deposit.tx_hash or ""
+                    deposit.tx_hash or ""
             ):
-
                 _fail_deposit(
                     db,
                     deposit.id,
@@ -2512,9 +2547,6 @@ async def verify_deposit(
                 )
 
             else:
-                # Do not keep a pooled TiDB connection checked out while the
-                # IMAP/network verification is running. With a small pool this
-                # used to make unrelated commands wait for the pool timeout.
                 db.close()
                 db = None
 
@@ -2534,7 +2566,6 @@ async def verify_deposit(
                     return deposit.status == "completed"
 
             if verification is None:
-
                 _record_pending_attempt(
                     deposit.id
                 )
@@ -2542,7 +2573,6 @@ async def verify_deposit(
                 return None
 
             if verification is False:
-
                 _fail_deposit(
                     db,
                     deposit.id,
@@ -2557,9 +2587,6 @@ async def verify_deposit(
                 ]
             )
 
-            # Use exactly the same live INR/USDT rate for the credited amount,
-            # validation, and stored conversion record. Wallet accounting stays
-            # precise to eight decimals; only Telegram display is rounded.
             rate = _get_usdt_inr_rate()
 
             received_amount = (
@@ -2569,7 +2596,7 @@ async def verify_deposit(
                 )
             )
 
-            if requested_amount is not None:
+            if requested_amount is not None and requested_amount > Decimal("0"):
 
                 requested_usdt = (
                     convert_inr_to_usdt(
@@ -2579,11 +2606,10 @@ async def verify_deposit(
                 )
 
                 if (
-                    received_amount
-                    < requested_usdt
-                    - AMOUNT_TOLERANCE
+                        received_amount
+                        < requested_usdt
+                        - AMOUNT_TOLERANCE
                 ):
-
                     _fail_deposit(
                         db,
                         deposit.id,
@@ -2612,9 +2638,8 @@ async def verify_deposit(
         if network == BINANCE_PAY_NETWORK:
 
             if not valid_order_id(
-                deposit.tx_hash or ""
+                    deposit.tx_hash or ""
             ):
-
                 _fail_deposit(
                     db,
                     deposit.id,
@@ -2623,8 +2648,6 @@ async def verify_deposit(
 
                 return False
 
-            # Binance Pay is an external request. Release the connection
-            # before awaiting it, then reload the row before changing it.
             db.close()
             db = None
 
@@ -2644,7 +2667,6 @@ async def verify_deposit(
                 return deposit.status == "completed"
 
             if verification is None:
-
                 _record_pending_attempt(
                     deposit.id
                 )
@@ -2652,7 +2674,6 @@ async def verify_deposit(
                 return None
 
             if verification is False:
-
                 _fail_deposit(
                     db,
                     deposit.id,
@@ -2665,14 +2686,13 @@ async def verify_deposit(
                 verification["amount"]
             )
 
-            if requested_amount is not None:
+            if requested_amount is not None and requested_amount > Decimal("0"):
 
                 if (
-                    received_amount
-                    < requested_amount
-                    - AMOUNT_TOLERANCE
+                        received_amount
+                        < requested_amount
+                        - AMOUNT_TOLERANCE
                 ):
-
                     _fail_deposit(
                         db,
                         deposit.id,
@@ -2697,9 +2717,8 @@ async def verify_deposit(
         # ========================================================
 
         if not valid_hash(
-            deposit.tx_hash or ""
+                deposit.tx_hash or ""
         ):
-
             _fail_deposit(
                 db,
                 deposit.id,
@@ -2709,7 +2728,6 @@ async def verify_deposit(
             return False
 
         if network not in CHAINS:
-
             _fail_deposit(
                 db,
                 deposit.id,
@@ -2724,8 +2742,6 @@ async def verify_deposit(
         # RPC + Binance
         # --------------------------------------------------------
 
-        # RPC and Binance history checks can take many seconds. Holding a DB
-        # connection across this await starves command handlers under load.
         db.close()
         db = None
 
@@ -2805,14 +2821,13 @@ async def verify_deposit(
             )
         )
 
-        if requested_amount is not None:
+        if requested_amount is not None and requested_amount > Decimal("0"):
 
             if (
-                received_amount
-                < requested_amount
-                - AMOUNT_TOLERANCE
+                    received_amount
+                    < requested_amount
+                    - AMOUNT_TOLERANCE
             ):
-
                 _finalize_failed(
                     db,
                     deposit,
@@ -2839,7 +2854,6 @@ async def verify_deposit(
         )
 
         if duplicate:
-
             _finalize_failed(
                 db,
                 deposit,
@@ -2864,7 +2878,6 @@ async def verify_deposit(
         )
 
         if success:
-
             logger.info(
                 "[%s] DEPOSIT VERIFIED + CREDITED | "
                 "tx=%s | coin=%s | amount=%s | "
@@ -2906,7 +2919,6 @@ async def verify_deposit(
 # ================================================================
 
 async def check_pending_deposits():
-
     global _binance_pending_skip_logged
 
     db = SessionLocal()
@@ -2967,11 +2979,10 @@ async def check_pending_deposits():
     )
 
     if (
-        _binance_access_restricted
-        and pay_ids
-        and not _binance_pending_skip_logged
+            _binance_access_restricted
+            and pay_ids
+            and not _binance_pending_skip_logged
     ):
-
         logger.warning(
             "Skipping %s Binance Pay deposit(s): Binance API access is "
             "restricted for this server. Keep these deposits pending for "
@@ -3057,7 +3068,6 @@ async def check_pending_deposits():
 # ================================================================
 
 async def deposit_checker_loop():
-
     logger.info("=" * 65)
 
     logger.info(
@@ -3113,7 +3123,6 @@ async def deposit_checker_loop():
 
 
 def start_checker():
-
     return asyncio.create_task(
         deposit_checker_loop()
     )
