@@ -35,10 +35,6 @@ def get_main_menu() -> InlineKeyboardMarkup:
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="🔑 API Access",
-                    callback_data="api_key_menu"
-                )
             ],
             [
                 InlineKeyboardButton(
@@ -84,10 +80,6 @@ def get_admin_main_menu() -> InlineKeyboardMarkup:
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="🔑 API Access",
-                    callback_data="api_key_menu"
-                )
             ],
             [
                 InlineKeyboardButton(
