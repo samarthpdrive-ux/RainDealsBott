@@ -22,7 +22,7 @@ from utils.ui import show, update_card
 router = Router()
 
 # Store only the Telegram username, without @ or a t.me URL.
-CONTACT_USERNAME = "Senacoun"
+CONTACT_USERNAME = "RainDealsbot"
 
 
 # =====================================================
