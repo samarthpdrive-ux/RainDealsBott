@@ -21,7 +21,8 @@ DELIVERY_BOT_TOKEN = os.getenv("DELIVERY_BOT_TOKEN", "")
 
 ADMIN_IDS = [
     1316577060,
-    7943742895
+    7943742895,
+    5327735171
 ]
 
 CHANNEL_LINK = "https://t.me/RainOrdersGroup"
