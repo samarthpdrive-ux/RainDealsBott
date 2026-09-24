@@ -245,7 +245,7 @@ def _build_start_welcome(user, full_name: str) -> str:
         "</blockquote>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📢 Stay Updated: @Senacoun\n\n"
+        "📢 Stay Updated: @Popeye7707\n\n"
         "👇 Tap a button below to get started."
     )
 
