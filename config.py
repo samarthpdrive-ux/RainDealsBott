@@ -31,9 +31,17 @@ TOS_LINK = "https://your-site.com/tos"
 GROUP_ID = -1003541834339
 GROUP_NOTIFICATIONS = True
 
-# Public channel that receives order and cancelled-deposit alerts. A bot must
-# be an administrator of this channel before it can post there. Use @username
-# for a public channel or its numeric -100... chat ID for a private channel.
+# Notification channels. A bot must be an administrator with permission to
+# post messages in each channel. Public @usernames work without a numeric ID.
+ORDER_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "ORDER_NOTIFICATION_CHANNEL_ID",
+    "@RainOrdersGroup",
+)
+STOCK_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "STOCK_NOTIFICATION_CHANNEL_ID",
+    "@RainStockGroup",
+)
+# Cancelled-deposit alerts only. Leave blank to disable this third channel.
 NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify")
 
 
@@ -93,7 +101,10 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 # STOCK ALERTS
 # ==========================================================
 
-STOCK_GROUP_ID = -1004396081675
+STOCK_GROUP_ID = os.getenv(
+    "STOCK_GROUP_ID",
+    STOCK_NOTIFICATION_CHANNEL_ID,
+)
 
 STOCK_NOTIFICATIONS = True
 

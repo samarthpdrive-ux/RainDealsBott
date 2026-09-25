@@ -69,7 +69,7 @@ STOCK_GROUP_ID = getattr(config, "STOCK_GROUP_ID", None)
 STOCK_NOTIFICATIONS = getattr(config, "STOCK_NOTIFICATIONS", True)
 GROUP_ID = getattr(config, "GROUP_ID", None)
 GROUP_NOTIFICATIONS = getattr(config, "GROUP_NOTIFICATIONS", False)
-NOTIFICATION_CHANNEL_ID = getattr(config, "NOTIFICATION_CHANNEL_ID", "")
+ORDER_NOTIFICATION_CHANNEL_ID = getattr(config, "ORDER_NOTIFICATION_CHANNEL_ID", "")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║            RESELLER LIVE STOCK CACHE & HELPERS               ║
@@ -2097,26 +2097,23 @@ async def _notify_admins_pending_order(bot, buyer_id: int, result: dict):
             logger.exception("Failed to notify admin %s of pending order", admin_id)
 
 
-async def _notify_order_channel(bot, buyer_id: int, result: dict):
-    """Post every successful order to the configured notification channel."""
-    if not NOTIFICATION_CHANNEL_ID:
+async def _notify_stock_purchase(bot, buyer_id: int, result: dict):
+    """Send the remaining stock to the dedicated stock channel after a sale."""
+    if not (STOCK_NOTIFICATIONS and STOCK_GROUP_ID):
         return
 
     try:
-        status = str(result.get("status") or "received").replace("_", " ").title()
         await bot.send_message(
-            NOTIFICATION_CHANNEL_ID,
-            f"🛒 <b>NEW ORDER RECEIVED</b>\n\n"
+            STOCK_GROUP_ID,
+            f"📦 <b>STOCK UPDATED</b>\n\n"
             f"🆔 Order: <code>#{result['order_id']}</code>\n"
-            f"👤 Buyer ID: <code>{buyer_id}</code>\n"
             f"📦 Product: {result['name']}\n"
-            f"🔢 Quantity: {result['quantity']}x\n"
-            f"💰 Total: ${result['total_price']:.2f}\n"
-            f"📊 Status: <b>{status}</b>",
+            f"➖ Sold: {result['quantity']}x\n"
+            f"📊 Remaining: <b>{result.get('stock', 'Unknown')}</b>",
             parse_mode="HTML",
         )
     except Exception:
-        logger.exception("Failed to post order notification to %s", NOTIFICATION_CHANNEL_ID)
+        logger.exception("Failed to post stock update to %s", STOCK_GROUP_ID)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -2314,8 +2311,8 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
             await show(callback, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
-        # Group notification
-        if GROUP_NOTIFICATIONS and GROUP_ID:
+        # Order notification channel
+        if ORDER_NOTIFICATION_CHANNEL_ID:
             try:
                 now = datetime.now().strftime("%d-%b-%Y %I:%M %p IST")
                 uid = str(telegram_id)
@@ -2335,12 +2332,12 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                     "<code>Wallet synchronized.</code>"
                 )
                 await callback.bot.send_message(
-                    chat_id=GROUP_ID,
+                    chat_id=ORDER_NOTIFICATION_CHANNEL_ID,
                     text=group_msg,
                     parse_mode="HTML",
                 )
             except Exception:
-                logger.exception("Failed to send group purchase notification")
+                logger.exception("Failed to send order notification")
 
         is_free = float(result.get("total_price", 0)) == 0
         delivery_instruction = result.get("delivery_instruction")
@@ -2513,7 +2510,7 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
 
         if result.get("low_stock_alert"):
             await _notify_admins_low_stock(callback.bot, result["low_stock_alert"])
-        await _notify_order_channel(callback.bot, telegram_id, result)
+        await _notify_stock_purchase(callback.bot, telegram_id, result)
         if result["status"] in ("pending_manual", "preorder"):
             await _notify_admins_pending_order(callback.bot, telegram_id, result)
 
