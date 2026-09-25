@@ -41,8 +41,21 @@ STOCK_NOTIFICATION_CHANNEL_ID = os.getenv(
     "STOCK_NOTIFICATION_CHANNEL_ID",
     "@RainStockGroup",
 )
-# Cancelled-deposit alerts only. Leave blank to disable this third channel.
+# Dedicated admin order-alert group.  This can be a public @username or a
+# private group ID such as -1001234567890.  New orders are read from the
+# database and sent here once; stock updates are never sent here.
+# NOTIFICATION_CHANNEL_ID remains the fallback so existing deployments do not
+# need an immediate environment-variable change.
+ADMIN_ORDER_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "ADMIN_ORDER_NOTIFICATION_CHANNEL_ID",
+    os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify"),
+)
+
+# Cancelled-deposit alerts use this same admin group unless disabled.
 NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify")
+ADMIN_ORDER_NOTIFICATION_POLL_SECONDS = max(
+    3, int(os.getenv("ADMIN_ORDER_NOTIFICATION_POLL_SECONDS", "5"))
+)
 
 
 # ==========================================================

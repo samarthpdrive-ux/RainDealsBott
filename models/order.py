@@ -169,6 +169,14 @@ class Order(Base):
         nullable=False,
     )
 
+    # Set only after the dedicated admin-order group receives this order.
+    # This makes notifications durable across restarts and prevents duplicates.
+    admin_notification_sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
     def __repr__(self) -> str:
         return (
             f"<Order "

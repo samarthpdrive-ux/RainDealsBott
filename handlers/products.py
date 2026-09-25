@@ -2082,21 +2082,6 @@ async def _notify_admins_low_stock(bot, alert: dict):
             logger.exception("Failed to notify admin %s of low stock", admin_id)
 
 
-async def _notify_admins_pending_order(bot, buyer_id: int, result: dict):
-    kind = "Preorder" if result["is_preorder"] else "Manual Order"
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id,
-                                   f"🆕 <b>NEW {kind.upper()}</b>\n\n{_divider('─', 24)}\n\n"
-                                   f"🆔 <b>Order:</b> #{result['order_id']}\n👤 <b>Buyer ID:</b> <code>{buyer_id}</code>\n"
-                                   f"📦 <b>Product:</b> {result['name']}\n🔢 <b>Quantity:</b> {result['quantity']}x\n"
-                                   f"💰 <b>Total:</b> ${result['total_price']:.2f}\n\n"
-                                   f"📋 <b>Action Required:</b>\nAdmin → Orders → #{result['order_id']} → Deliver",
-                                   parse_mode="HTML")
-        except Exception:
-            logger.exception("Failed to notify admin %s of pending order", admin_id)
-
-
 async def _notify_stock_purchase(bot, buyer_id: int, result: dict):
     """Send the remaining stock to the dedicated stock channel after a sale."""
     if not (STOCK_NOTIFICATIONS and STOCK_GROUP_ID):
@@ -2511,9 +2496,6 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         if result.get("low_stock_alert"):
             await _notify_admins_low_stock(callback.bot, result["low_stock_alert"])
         await _notify_stock_purchase(callback.bot, telegram_id, result)
-        if result["status"] in ("pending_manual", "preorder"):
-            await _notify_admins_pending_order(callback.bot, telegram_id, result)
-
         fresh_product = await asyncio.to_thread(_fetch_product, product_id)
         if fresh_product:
             _fire_stock_scan(callback.bot, [fresh_product])

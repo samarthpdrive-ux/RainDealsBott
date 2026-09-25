@@ -26,6 +26,7 @@ from api.reseller_v1 import router as reseller_router
 from bot_app import bot, dp
 from delivery_bot_app import delivery_bot, delivery_dp
 from services.deposit_checker import deposit_checker_loop
+from services.order_notifications import order_notification_loop
 from config import API_MAX_REQUEST_BYTES
 
 
@@ -63,6 +64,7 @@ if not INTERNAL_SECRET:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     deposit_task: asyncio.Task | None = None
+    order_notification_task: asyncio.Task | None = None
     polling_task: asyncio.Task | None = None
     delivery_polling_task: asyncio.Task | None = None
 
@@ -87,6 +89,11 @@ async def lifespan(app: FastAPI):
         deposit_task = asyncio.create_task(
             deposit_checker_loop(bot),
             name="deposit-checker",
+        )
+
+        order_notification_task = asyncio.create_task(
+            order_notification_loop(bot),
+            name="admin-order-notifications",
         )
 
         # ----------------------------------------------------
@@ -139,6 +146,7 @@ async def lifespan(app: FastAPI):
             delivery_polling_task,
             polling_task,
             deposit_task,
+            order_notification_task,
         )
 
         for task in tasks:
