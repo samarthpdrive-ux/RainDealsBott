@@ -6,7 +6,15 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject, Update
 
-from config import ADMIN_IDS, CHANNEL_LINK, GROUP_LINK, BANNED_USER_CACHE_TTL, MEMBERSHIP_CACHE_TTL
+from config import (
+    ADMIN_IDS,
+    BANNED_USER_CACHE_TTL,
+    CHANNEL_LINK,
+    GROUP_LINK,
+    MEMBERSHIP_CACHE_TTL,
+    MEMBERSHIP_RETRY_DELAY_SECONDS,
+    MEMBERSHIP_VERIFY_ATTEMPTS,
+)
 from database import SessionLocal
 from models.user import User
 
@@ -30,11 +38,15 @@ CHANNEL_USERNAME = _extract_username(CHANNEL_LINK)
 GROUP_USERNAME = _extract_username(GROUP_LINK)
 
 
-async def check_user_membership(bot, user_id: int) -> bool:
-    """Return True only when the user belongs to every configured public chat."""
+async def check_user_membership(bot, user_id: int, *, force_refresh: bool = False) -> bool:
+    """Return True only when the user belongs to every configured public chat.
+
+    A failed result is never cached: a user may have just joined and Telegram
+    can need a few seconds before getChatMember reflects that change.
+    """
     now = time.monotonic()
     cached = _membership_cache.get(user_id)
-    if cached and now - cached[1] < MEMBERSHIP_CACHE_TTL:
+    if not force_refresh and cached and now - cached[1] < MEMBERSHIP_CACHE_TTL:
         return cached[0]
 
     chats = [chat for chat in (CHANNEL_USERNAME, GROUP_USERNAME) if chat]
@@ -43,21 +55,30 @@ async def check_user_membership(bot, user_id: int) -> bool:
         return True
 
     async def check_chat(chat_username: str) -> bool:
-        try:
-            # Do both checks concurrently and fail quickly instead of making a
-            # user wait for Telegram's full request timeout.
-            member = await asyncio.wait_for(
-                bot.get_chat_member(chat_id=chat_username, user_id=user_id), timeout=5
-            )
-            return member.status not in ("left", "kicked")
-        except Exception:
-            # A temporary Telegram/API configuration failure must not lock users out.
-            logger.exception("Membership check failed for %s", chat_username)
-            return True
+        for attempt in range(MEMBERSHIP_VERIFY_ATTEMPTS):
+            try:
+                # Check chats concurrently. A recently joined user is checked
+                # again briefly because Telegram membership updates can lag.
+                member = await asyncio.wait_for(
+                    bot.get_chat_member(chat_id=chat_username, user_id=user_id), timeout=5
+                )
+                if member.status not in ("left", "kicked"):
+                    return True
+            except Exception:
+                # A temporary Telegram/API configuration failure must not lock users out.
+                logger.exception("Membership check failed for %s", chat_username)
+                return True
+
+            if attempt < MEMBERSHIP_VERIFY_ATTEMPTS - 1:
+                await asyncio.sleep(MEMBERSHIP_RETRY_DELAY_SECONDS)
+
+        return False
 
     is_member = all(await asyncio.gather(*(check_chat(chat) for chat in chats)))
-    if MEMBERSHIP_CACHE_TTL > 0:
+    if is_member and MEMBERSHIP_CACHE_TTL > 0:
         _membership_cache[user_id] = (is_member, now)
+    else:
+        _membership_cache.pop(user_id, None)
     return is_member
 
 
