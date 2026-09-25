@@ -31,6 +31,7 @@ import re
 import time
 
 from collections import defaultdict, deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -40,13 +41,20 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     status,
 )
 
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from config import API_RATE_LIMIT_PER_SECOND
+from config import (
+    API_INVALID_AUTH_LIMIT_PER_MINUTE,
+    API_MAX_CONCURRENT_ORDERS,
+    API_ORDER_LIMIT_PER_MINUTE,
+    API_RATE_LIMIT_PER_MINUTE,
+    API_RATE_LIMIT_PER_SECOND,
+)
 from database import SessionLocal
 
 from models.api_key import ApiKey, ApiOrder
@@ -95,6 +103,14 @@ _client_order_id = re.compile(
 # ============================================================
 
 _rate_windows: dict[int, deque[float]] = defaultdict(deque)
+
+_minute_rate_windows: dict[int, deque[float]] = defaultdict(deque)
+
+_order_windows: dict[int, deque[float]] = defaultdict(deque)
+
+_invalid_auth_windows: dict[str, deque[float]] = defaultdict(deque)
+
+_in_flight_orders: dict[int, int] = defaultdict(int)
 
 _rate_lock = asyncio.Lock()
 
@@ -149,6 +165,7 @@ def _api_error(
     code: str,
     message: str,
     http_status: int,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
 
     return HTTPException(
@@ -158,6 +175,7 @@ def _api_error(
             "error": code,
             "message": message,
         },
+        headers=headers,
     )
 
 
@@ -173,8 +191,13 @@ async def _limit_key(key_id: int) -> None:
 
         window = _rate_windows[key_id]
 
+        minute_window = _minute_rate_windows[key_id]
+
         while window and now - window[0] >= 1:
             window.popleft()
+
+        while minute_window and now - minute_window[0] >= 60:
+            minute_window.popleft()
 
         limit = max(
             1,
@@ -183,13 +206,129 @@ async def _limit_key(key_id: int) -> None:
 
         if len(window) >= limit:
 
+            retry_after = max(1, int(1 - (now - window[0])) + 1)
+
             raise _api_error(
                 "rate_limited",
                 f"Maximum {limit} requests per second per API key.",
                 429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        minute_limit = max(1, int(API_RATE_LIMIT_PER_MINUTE))
+
+        if len(minute_window) >= minute_limit:
+
+            retry_after = max(1, int(60 - (now - minute_window[0])) + 1)
+
+            raise _api_error(
+                "rate_limited",
+                f"Maximum {minute_limit} requests per minute per API key.",
+                429,
+                headers={"Retry-After": str(retry_after)},
             )
 
         window.append(now)
+
+        minute_window.append(now)
+
+
+async def _limit_order(key_id: int) -> None:
+    """Allow only a small number of purchases and one active purchase per key."""
+
+    now = time.monotonic()
+
+    async with _rate_lock:
+
+        window = _order_windows[key_id]
+
+        while window and now - window[0] >= 60:
+            window.popleft()
+
+        limit = max(1, int(API_ORDER_LIMIT_PER_MINUTE))
+
+        if len(window) >= limit:
+
+            retry_after = max(1, int(60 - (now - window[0])) + 1)
+
+            raise _api_error(
+                "order_rate_limited",
+                f"Maximum {limit} order requests per minute per API key.",
+                429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        concurrent_limit = max(1, int(API_MAX_CONCURRENT_ORDERS))
+
+        if _in_flight_orders[key_id] >= concurrent_limit:
+
+            raise _api_error(
+                "order_in_progress",
+                "Another order request is already being processed for this API key.",
+                429,
+                headers={"Retry-After": "1"},
+            )
+
+        window.append(now)
+
+        _in_flight_orders[key_id] += 1
+
+
+async def _release_order(key_id: int) -> None:
+    """Release a purchase slot after the endpoint has completed."""
+
+    async with _rate_lock:
+
+        if _in_flight_orders[key_id] <= 1:
+            _in_flight_orders.pop(key_id, None)
+        else:
+            _in_flight_orders[key_id] -= 1
+
+
+def _client_address(request: Request) -> str:
+    """Use the direct peer address; do not trust spoofable forwarding headers."""
+
+    return request.client.host if request.client else "unknown"
+
+
+async def _reject_invalid_auth_flood(client_address: str) -> None:
+    """Stop repeated bad credentials before another database lookup is made."""
+
+    now = time.monotonic()
+
+    async with _rate_lock:
+
+        window = _invalid_auth_windows.get(client_address)
+
+        if not window:
+            return
+
+        while window and now - window[0] >= 60:
+            window.popleft()
+
+        if not window:
+            _invalid_auth_windows.pop(client_address, None)
+            return
+
+        limit = max(1, int(API_INVALID_AUTH_LIMIT_PER_MINUTE))
+
+        if len(window) >= limit:
+
+            retry_after = max(1, int(60 - (now - window[0])) + 1)
+
+            raise _api_error(
+                "invalid_auth_rate_limited",
+                "Too many invalid API-key attempts. Try again later.",
+                429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+
+async def _record_invalid_auth(client_address: str) -> None:
+    """Remember a rejected authentication attempt for one minute."""
+
+    async with _rate_lock:
+        _invalid_auth_windows[client_address].append(time.monotonic())
 
 
 # ============================================================
@@ -280,6 +419,7 @@ def _load_principal(
 
 
 async def api_principal(
+    request: Request,
     authorization: str | None = Header(
         default=None,
         alias="Authorization",
@@ -290,12 +430,18 @@ async def api_principal(
     ),
 ) -> ApiPrincipal:
 
+    client_address = _client_address(request)
+
+    await _reject_invalid_auth_flood(client_address)
+
     raw_key = _extract_api_key(
         authorization,
         x_api_key,
     )
 
     if not raw_key:
+
+        await _record_invalid_auth(client_address)
 
         raise _api_error(
             "missing_api_key",
@@ -336,6 +482,8 @@ async def api_principal(
 
     if not principal:
 
+        await _record_invalid_auth(client_address)
+
         raise _api_error(
             "invalid_api_key",
             "Missing, invalid, revoked, or blocked API key.",
@@ -347,6 +495,19 @@ async def api_principal(
     )
 
     return principal
+
+
+async def api_order_principal(
+    principal: ApiPrincipal = Depends(api_principal),
+) -> AsyncIterator[ApiPrincipal]:
+    """Apply purchase-specific limits and always release the active slot."""
+
+    await _limit_order(principal.key_id)
+
+    try:
+        yield principal
+    finally:
+        await _release_order(principal.key_id)
 
 
 # ============================================================
@@ -887,9 +1048,7 @@ async def get_products(
 )
 async def create_order(
     payload: OrderRequest,
-    principal: ApiPrincipal = Depends(
-        api_principal
-    ),
+    principal: ApiPrincipal = Depends(api_order_principal),
 ):
 
     # --------------------------------------------------------
