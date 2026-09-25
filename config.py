@@ -65,6 +65,16 @@ API_KEY_ENCRYPTION_KEY = os.getenv("API_KEY_ENCRYPTION_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 API_RATE_LIMIT_PER_SECOND = max(1, int(os.getenv("API_RATE_LIMIT_PER_SECOND", "3")))
 
+# Per-user/API-key abuse protection
+API_RATE_LIMIT_PER_MINUTE = max(1, int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "120")))
+API_ORDER_LIMIT_PER_MINUTE = max(1, int(os.getenv("API_ORDER_LIMIT_PER_MINUTE", "10")))
+API_MAX_CONCURRENT_ORDERS = max(1, int(os.getenv("API_MAX_CONCURRENT_ORDERS", "1")))
+API_INVALID_AUTH_LIMIT_PER_MINUTE = max(
+    1,
+    int(os.getenv("API_INVALID_AUTH_LIMIT_PER_MINUTE", "20")),
+)
+API_MAX_REQUEST_BYTES = max(1024, int(os.getenv("API_MAX_REQUEST_BYTES", "16384")))
+
 # The gateway on Wasmer sends this value to the bot for every internal API
 # request.  It must be a long random value, identical in Vercel/Render and
 # Wasmer secrets, and must never be returned to an API client.
@@ -688,6 +698,20 @@ DATABASE_POOL_TIMEOUT = int(os.getenv("DATABASE_POOL_TIMEOUT", "10"))
 # every Telegram update. Set either value to 0 to turn its cache off.
 MEMBERSHIP_CACHE_TTL = int(os.getenv("MEMBERSHIP_CACHE_TTL", "300"))
 BANNED_USER_CACHE_TTL = int(os.getenv("BANNED_USER_CACHE_TTL", "30"))
+
+# Recheck new channel/group joins because Telegram can take a few seconds
+# to update membership status.
+MEMBERSHIP_VERIFY_ATTEMPTS = max(
+    1,
+    int(os.getenv("MEMBERSHIP_VERIFY_ATTEMPTS", "3")),
+)
+MEMBERSHIP_RETRY_DELAY_SECONDS = max(
+    0.0,
+    min(
+        5.0,
+        float(os.getenv("MEMBERSHIP_RETRY_DELAY_SECONDS", "1")),
+    ),
+)
 ENABLE_PERFORMANCE_METRICS = True
 METRICS_COLLECTION_INTERVAL = 60
 CACHE_BACKEND = "memory"
