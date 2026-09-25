@@ -6,44 +6,45 @@ def get_main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🛍 Products",
-                    callback_data="products_menu"
+                    text="🛍 Shop Products",
+                    callback_data="products_menu",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="💰 Deposit",
-                    callback_data="deposit_start"
+                    text="🎁 Refer & Earn",
+                    callback_data="referrals_menu",
+                    style="success",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="👤 Profile",
-                    callback_data="my_profile"
+                    text="📦 My Orders",
+                    callback_data="orders_menu",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="👥 Referrals",
-                    callback_data="referrals_menu"
+                    text="💰 My Wallet",
+                    callback_data="deposit_start",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📦 Orders",
-                    callback_data="orders_menu"
+                    text="🆘 Help & Support",
+                    callback_data="support_ticket",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="🎫 Support",
-                    callback_data="support_ticket"
+                    text="👤 My Profile",
+                    callback_data="my_profile",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🔑 API Access",
-                    callback_data="api_key_menu"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📞 Contact",
-                    callback_data="contact_info"
+                    callback_data="api_key_menu",
+                    style="primary",
                 )
             ]
         ]
@@ -55,48 +56,52 @@ def get_admin_main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🛍 Products",
-                    callback_data="products_menu"
+                    text="🛍 Shop Products",
+                    callback_data="products_menu",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="💰 Deposit",
-                    callback_data="deposit_start"
+                    text="🎁 Refer & Earn",
+                    callback_data="referrals_menu",
+                    style="success",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="👤 Profile",
-                    callback_data="my_profile"
+                    text="📦 My Orders",
+                    callback_data="orders_menu",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="👥 Referrals",
-                    callback_data="referrals_menu"
+                    text="💰 My Wallet",
+                    callback_data="deposit_start",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📦 Orders",
-                    callback_data="orders_menu"
+                    text="🆘 Help & Support",
+                    callback_data="support_ticket",
+                    style="primary",
                 ),
                 InlineKeyboardButton(
-                    text="🎫 Support",
-                    callback_data="support_ticket"
+                    text="👤 My Profile",
+                    callback_data="my_profile",
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🔑 API Access",
-                    callback_data="api_key_menu"
-                )
+                    callback_data="api_key_menu",
+                    style="primary",
+                ),
             ],
             [
                 InlineKeyboardButton(
-                    text="📞 Contact",
-                    callback_data="contact_info"
-                ),
-                InlineKeyboardButton(
                     text="👑 Admin",
-                    callback_data="admin_panel"
+                    callback_data="admin_panel",
+                    style="danger",
                 )
             ]
         ]
