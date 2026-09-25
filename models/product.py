@@ -96,6 +96,15 @@ class Product(Base):
         default=True,
     )
 
+    # Controls only public reseller-API visibility and ordering.  It does not
+    # affect the normal Telegram shop, which continues to use is_active.
+    api_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="1",
+    )
+
     # "automatic", "manual", or "hybrid"
     delivery_type: Mapped[str] = mapped_column(
         String(20),
@@ -208,6 +217,7 @@ class Product(Base):
             "price": str(self.price) if self.price is not None else "0.00000000",
             "stock": self.stock,
             "is_active": self.is_active,
+            "api_enabled": self.api_enabled,
             "delivery_type": self.delivery_type,
             "preorder": self.preorder,
             "low_stock_threshold": self.low_stock_threshold,

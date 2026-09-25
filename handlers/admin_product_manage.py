@@ -290,6 +290,9 @@ ${float(product.price or 0):.2f}
 
 <b>Status:</b>
 {"🟢 Enabled" if product.is_active else "🔴 Disabled"}
+
+🌐 <b>Reseller API:</b>
+{"🟢 Enabled" if getattr(product, "api_enabled", True) else "🔴 Disabled"}
 """
 
     # Add Provider / Reseller Details if configured
@@ -346,6 +349,16 @@ ${float(product.price or 0):.2f}
                 InlineKeyboardButton(
                     text="🔴 Disable" if product.is_active else "🟢 Enable",
                     callback_data=f"toggle_{product.id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=(
+                        "🌐 API: 🟢 ON"
+                        if getattr(product, "api_enabled", True)
+                        else "🌐 API: 🔴 OFF"
+                    ),
+                    callback_data=f"toggle_api_{product.id}"
                 )
             ],
             [
@@ -682,6 +695,7 @@ async def clear_accounts(callback: CallbackQuery):
 @router.callback_query(
     F.data.startswith("toggle_")
     & ~F.data.startswith("toggle_preorder_")
+    & ~F.data.startswith("toggle_api_")
 )
 async def toggle_product(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -699,6 +713,34 @@ async def toggle_product(callback: CallbackQuery):
     finally:
         db.close()
 
+    await _refresh_manage_panel(callback, pid)
+
+
+@router.callback_query(F.data.startswith("toggle_api_"))
+async def toggle_product_api(callback: CallbackQuery):
+    """Enable or disable this product for public API customers only."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    pid = int(callback.data.split("_")[2])
+    db = SessionLocal()
+    try:
+        product = db.query(Product).filter(Product.id == pid).first()
+        if not product:
+            await callback.answer("❌ Product not found.", show_alert=True)
+            return
+        product.api_enabled = not bool(getattr(product, "api_enabled", True))
+        db.commit()
+        api_enabled = product.api_enabled
+    finally:
+        db.close()
+
+    await callback.answer(
+        "🌐 API enabled for this product"
+        if api_enabled
+        else "🌐 API disabled for this product"
+    )
     await _refresh_manage_panel(callback, pid)
 
 

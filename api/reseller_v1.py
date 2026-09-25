@@ -583,7 +583,8 @@ def _list_products(
         products = (
             db.query(Product)
             .filter(
-                Product.is_active == True
+                Product.is_active == True,
+                Product.api_enabled == True,
             )
             .order_by(
                 Product.id.asc()
@@ -974,6 +975,11 @@ def _product_source(
             return None
 
         if not product.is_active:
+            return None
+
+        # An admin can temporarily stop API sales during low stock while the
+        # normal Telegram shop remains available.
+        if not product.api_enabled:
             return None
 
         return (

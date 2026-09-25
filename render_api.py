@@ -27,6 +27,7 @@ from bot_app import bot, dp
 from delivery_bot_app import delivery_bot, delivery_dp
 from services.deposit_checker import deposit_checker_loop
 from services.order_notifications import order_notification_loop
+from services.product_api_access import ensure_product_api_access_schema
 from config import API_MAX_REQUEST_BYTES
 
 
@@ -69,6 +70,8 @@ async def lifespan(app: FastAPI):
     delivery_polling_task: asyncio.Task | None = None
 
     try:
+        await asyncio.to_thread(ensure_product_api_access_schema)
+
         # ----------------------------------------------------
         # Telegram main bot
         # ----------------------------------------------------
