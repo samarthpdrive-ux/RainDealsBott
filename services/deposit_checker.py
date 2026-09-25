@@ -366,7 +366,9 @@ try:
         )
     )
 except (TypeError, ValueError):
-    MAX_CHECK_ATTEMPTS = 180
+    MAX_CHECK_ATTEMPTS = 10
+
+MAX_CHECK_ATTEMPTS = max(1, MAX_CHECK_ATTEMPTS)
 
 CHECK_INTERVAL = int(
     getattr(
@@ -2374,6 +2376,96 @@ def _clear_pending_attempts(
     )
 
 
+def _keep_pending_or_cancel(
+        db,
+        deposit: Deposit,
+        result_info: dict | None = None,
+) -> bool:
+    """Count a pending verification and cancel it at the configured limit."""
+    attempts = _record_pending_attempt(deposit.id)
+
+    if attempts < MAX_CHECK_ATTEMPTS:
+        logger.info(
+            "[%s] Deposit %s still pending (attempt %s/%s)",
+            deposit.network,
+            deposit.id,
+            attempts,
+            MAX_CHECK_ATTEMPTS,
+        )
+        return True
+
+    _finalize_failed(
+        db,
+        deposit,
+        f"verification attempt limit reached ({attempts}/{MAX_CHECK_ATTEMPTS})",
+    )
+    logger.warning("Deposit %s cancelled after %s verification attempts", deposit.id, attempts)
+
+    if result_info is not None:
+        result_info.update({
+            "reason": "attempt_limit",
+            "deposit_id": deposit.id,
+            "attempts": attempts,
+            "telegram_id": deposit.telegram_id,
+            "network": str(deposit.network or ""),
+        })
+
+    return False
+
+
+async def _notify_attempt_limit(bot, result_info: dict) -> None:
+    """Tell the customer that automatic checking stopped exactly once."""
+    if not bot or result_info.get("reason") != "attempt_limit":
+        return
+
+    telegram_id = result_info.get("telegram_id")
+    if not telegram_id:
+        return
+
+    try:
+        await bot.send_message(
+            telegram_id,
+            "⚠️ <b>Deposit Verification Cancelled</b>\n\n"
+            f"We could not verify your payment after {result_info.get('attempts', MAX_CHECK_ATTEMPTS)} checks, "
+            "so automatic checking has stopped.\n\n"
+            "The admin has been notified. If you made the payment, contact support and include your "
+            "transaction reference and deposit ID.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Failed to notify user %s about cancelled deposit", telegram_id)
+
+    for admin_id in getattr(config, "ADMIN_IDS", []):
+        try:
+            await bot.send_message(
+                admin_id,
+                "⚠️ <b>Deposit Verification Cancelled</b>\n\n"
+                f"🆔 Deposit: <code>#{result_info.get('deposit_id')}</code>\n"
+                f"👤 User: <code>{telegram_id}</code>\n"
+                f"📡 Network: <code>{result_info.get('network') or 'Unknown'}</code>\n"
+                f"🔁 Checks used: <code>{result_info.get('attempts', MAX_CHECK_ATTEMPTS)}</code>\n\n"
+                "Automatic verification has stopped for this deposit.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception("Failed to alert admin %s about cancelled deposit", admin_id)
+
+    notification_channel = getattr(config, "NOTIFICATION_CHANNEL_ID", "")
+    if notification_channel:
+        try:
+            await bot.send_message(
+                notification_channel,
+                "⚠️ <b>Deposit Verification Cancelled</b>\n\n"
+                f"🆔 Deposit: <code>#{result_info.get('deposit_id')}</code>\n"
+                f"👤 User: <code>{telegram_id}</code>\n"
+                f"📡 Network: <code>{result_info.get('network') or 'Unknown'}</code>\n"
+                f"🔁 Checks used: <code>{result_info.get('attempts', MAX_CHECK_ATTEMPTS)}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception("Failed to post cancelled deposit alert to %s", notification_channel)
+
+
 # ================================================================
 # FAILED DEPOSIT
 # ================================================================
@@ -2566,11 +2658,7 @@ async def verify_deposit(
                     return deposit.status == "completed"
 
             if verification is None:
-                _record_pending_attempt(
-                    deposit.id
-                )
-
-                return None
+                return None if _keep_pending_or_cancel(db, deposit, result_info) else False
 
             if verification is False:
                 _fail_deposit(
@@ -2667,11 +2755,7 @@ async def verify_deposit(
                 return deposit.status == "completed"
 
             if verification is None:
-                _record_pending_attempt(
-                    deposit.id
-                )
-
-                return None
+                return None if _keep_pending_or_cancel(db, deposit, result_info) else False
 
             if verification is False:
                 _fail_deposit(
@@ -2767,28 +2851,11 @@ async def verify_deposit(
         # --------------------------------------------------------
 
         if verification is None:
-
-            attempts = (
-                _record_pending_attempt(
-                    deposit.id
-                )
-            )
-
-            logger.info(
-                "[%s] Deposit %s still pending "
-                "(attempt %s/%s)",
-                network,
-                deposit.id,
-                attempts,
-                MAX_CHECK_ATTEMPTS,
-            )
-
-            if result_info is not None:
-                result_info[
-                    "reason"
-                ] = "pending"
-
-            return None
+            if _keep_pending_or_cancel(db, deposit, result_info):
+                if result_info is not None:
+                    result_info["reason"] = "pending"
+                return None
+            return False
 
         # --------------------------------------------------------
         # Permanently invalid
@@ -2918,7 +2985,7 @@ async def verify_deposit(
 # CHECK PENDING DEPOSITS
 # ================================================================
 
-async def check_pending_deposits():
+async def check_pending_deposits(bot=None):
     global _binance_pending_skip_logged
 
     db = SessionLocal()
@@ -2999,10 +3066,12 @@ async def check_pending_deposits():
     for deposit_id in crypto_ids:
 
         try:
-
+            result_info: dict = {}
             await verify_deposit(
-                deposit_id
+                deposit_id,
+                result_info=result_info,
             )
+            await _notify_attempt_limit(bot, result_info)
 
         except Exception:
 
@@ -3018,10 +3087,12 @@ async def check_pending_deposits():
     for deposit_id in ([] if _binance_access_restricted else pay_ids):
 
         try:
-
+            result_info: dict = {}
             await verify_deposit(
-                deposit_id
+                deposit_id,
+                result_info=result_info,
             )
+            await _notify_attempt_limit(bot, result_info)
 
         except Exception:
 
@@ -3049,11 +3120,13 @@ async def check_pending_deposits():
         for deposit_id in upi_ids:
 
             try:
-
+                result_info: dict = {}
                 await verify_deposit(
                     deposit_id,
                     upi_matches=upi_matches,
+                    result_info=result_info,
                 )
+                await _notify_attempt_limit(bot, result_info)
 
             except Exception:
 
@@ -3067,7 +3140,7 @@ async def check_pending_deposits():
 # BACKGROUND LOOP
 # ================================================================
 
-async def deposit_checker_loop():
+async def deposit_checker_loop(bot=None):
     logger.info("=" * 65)
 
     logger.info(
@@ -3109,7 +3182,7 @@ async def deposit_checker_loop():
 
         try:
 
-            await check_pending_deposits()
+            await check_pending_deposits(bot)
 
         except Exception:
 

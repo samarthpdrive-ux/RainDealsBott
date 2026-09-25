@@ -99,7 +99,7 @@ async def main():
     # --------------------------------------------------------
 
     deposit_task = asyncio.create_task(
-        deposit_checker_loop()
+        deposit_checker_loop(bot)
     )
 
     logger.info(

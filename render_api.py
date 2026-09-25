@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
         # ----------------------------------------------------
 
         deposit_task = asyncio.create_task(
-            deposit_checker_loop(),
+            deposit_checker_loop(bot),
             name="deposit-checker",
         )
 

@@ -1384,7 +1384,23 @@ async def process_txid(message: Message, state: FSMContext):
     # ═══════════════════════════════════════════════════════════════
     if success is False:
         reason = result_info.get("reason")
-        if reason == "underpaid":
+        if reason == "attempt_limit":
+            await update_card(
+                message, None,
+                (
+                    f"⚠️ <b>VERIFICATION CANCELLED</b>\n\n"
+                    f"We could not verify this payment after {result_info.get('attempts', 10)} checks. "
+                    f"Automatic checking has stopped.\n\n"
+                    f"🆔 Deposit: <code>#{deposit_id}</code>\n"
+                    f"🔑 Ref: <code>{txid[:24]}...</code>\n\n"
+                    f"The admin has been notified. If you paid successfully, contact support and include these details."
+                ),
+                chat_id=card_chat_id,
+                message_id=card_message_id,
+                parse_mode="HTML",
+                reply_markup=_status_kb("failure", network),
+            )
+        elif reason == "underpaid":
             await update_card(
                 message, None,
                 (

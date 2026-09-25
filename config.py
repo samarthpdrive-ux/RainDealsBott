@@ -31,6 +31,11 @@ TOS_LINK = "https://your-site.com/tos"
 GROUP_ID = -1003541834339
 GROUP_NOTIFICATIONS = True
 
+# Public channel that receives order and cancelled-deposit alerts. A bot must
+# be an administrator of this channel before it can post there. Use @username
+# for a public channel or its numeric -100... chat ID for a private channel.
+NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify")
+
 
 # ==========================================================
 # VERCEL / WEBHOOK
@@ -418,7 +423,9 @@ DEPOSIT_AMOUNT_TOLERANCE = "0.000001"
 
 DEPOSIT_ALLOW_OVERPAY = True
 
-DEPOSIT_MAX_CHECK_ATTEMPTS = 60
+# A pending deposit is checked at most this many times, including the first
+# check after the customer submits its reference. It is then cancelled.
+DEPOSIT_MAX_CHECK_ATTEMPTS = max(1, int(os.getenv("DEPOSIT_MAX_CHECK_ATTEMPTS", "10")))
 
 DEPOSIT_DELETE_FAILED = False
 

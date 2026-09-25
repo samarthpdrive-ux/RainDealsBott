@@ -69,6 +69,7 @@ STOCK_GROUP_ID = getattr(config, "STOCK_GROUP_ID", None)
 STOCK_NOTIFICATIONS = getattr(config, "STOCK_NOTIFICATIONS", True)
 GROUP_ID = getattr(config, "GROUP_ID", None)
 GROUP_NOTIFICATIONS = getattr(config, "GROUP_NOTIFICATIONS", False)
+NOTIFICATION_CHANNEL_ID = getattr(config, "NOTIFICATION_CHANNEL_ID", "")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║            RESELLER LIVE STOCK CACHE & HELPERS               ║
@@ -2096,6 +2097,28 @@ async def _notify_admins_pending_order(bot, buyer_id: int, result: dict):
             logger.exception("Failed to notify admin %s of pending order", admin_id)
 
 
+async def _notify_order_channel(bot, buyer_id: int, result: dict):
+    """Post every successful order to the configured notification channel."""
+    if not NOTIFICATION_CHANNEL_ID:
+        return
+
+    try:
+        status = str(result.get("status") or "received").replace("_", " ").title()
+        await bot.send_message(
+            NOTIFICATION_CHANNEL_ID,
+            f"🛒 <b>NEW ORDER RECEIVED</b>\n\n"
+            f"🆔 Order: <code>#{result['order_id']}</code>\n"
+            f"👤 Buyer ID: <code>{buyer_id}</code>\n"
+            f"📦 Product: {result['name']}\n"
+            f"🔢 Quantity: {result['quantity']}x\n"
+            f"💰 Total: ${result['total_price']:.2f}\n"
+            f"📊 Status: <b>{status}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Failed to post order notification to %s", NOTIFICATION_CHANNEL_ID)
+
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║          DELIVERY INSTRUCTION BUTTON HANDLER                 ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -2490,6 +2513,7 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
 
         if result.get("low_stock_alert"):
             await _notify_admins_low_stock(callback.bot, result["low_stock_alert"])
+        await _notify_order_channel(callback.bot, telegram_id, result)
         if result["status"] in ("pending_manual", "preorder"):
             await _notify_admins_pending_order(callback.bot, telegram_id, result)
 
