@@ -207,47 +207,8 @@ def _build_audit_profile(user, telegram_id: int) -> str:
 # ╚══════════════════════════════════════════════════════════════╝
 
 def _build_start_welcome(user, full_name: str) -> str:
-    """Terminal-style welcome dashboard with exact fractional balance display."""
-    balance_raw = getattr(user, 'balance_display', getattr(user, 'balance', 0))
-    balance_str = _format_balance(balance_raw)
-
-    total_orders = int(getattr(user, 'total_orders', 0) or 0)
-    total_refs = int(getattr(user, 'total_referrals', 0) or 0)
-
-    first_name = full_name.split()[0] if full_name else "user"
-
-    return (
-        "🛍 Rain Store\n"
-        "Premium Digital Marketplace\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👋 Welcome back, {safe(first_name)}\n\n"
-        "💎 Standard Plan\n\n"
-        f"💰 Wallet: ${balance_str}\n"
-        f"📦 Orders: {total_orders}\n"
-        f"🎁 Rewards: {total_refs}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "<blockquote>"
-        "✓ Verified Premium Products\n"
-        "✓ Instant Delivery\n"
-        "✓ Secure Payments\n"
-        "✓ Dedicated Customer Support"
-        "</blockquote>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "<blockquote>"
-        "🛒 Shop \"Browse premium digital products\"\n"
-        "💰 Deposit \"Top up your wallet instantly\"\n"
-        "👤 Profile \"Manage your account & wallet\"\n"
-        "📦 Orders \"View purchases & product keys\"\n"
-        "📞 Support \"Get help from our support team\""
-        "</blockquote>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📢 Stay Updated: @Popeye7707\n\n"
-        "👇 Tap a button below to get started."
-    )
+    """A single lightweight welcome card for the main menu."""
+    return "<blockquote>🛍 <b>Welcome to Rain Store Bot!</b></blockquote>"
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -324,8 +285,12 @@ async def my_profile(callback: CallbackQuery):
 
 @router.callback_query(F.data == "check_membership_retry")
 async def retry_membership_check(callback: CallbackQuery):
-    """Re-check if user has joined the channel."""
-    is_member = await check_user_membership(callback.bot, callback.from_user.id)
+    """Run a fresh check after a user joins a required chat."""
+    is_member = await check_user_membership(
+        callback.bot,
+        callback.from_user.id,
+        force_refresh=True,
+    )
 
     if is_member:
         await callback.message.delete()
@@ -337,7 +302,7 @@ async def retry_membership_check(callback: CallbackQuery):
         await callback.answer("✅ Verified! Send /start", show_alert=True)
     else:
         await callback.answer(
-            "❌ You haven't joined yet! Please join all channels first.",
+            "❌ Membership is not active yet. Join every required chat, then try again.",
             show_alert=True
         )
 
@@ -420,7 +385,7 @@ async def start_cmd(message: Message, command: CommandObject):
         if not is_member:
             await message.answer(
                 "⚠️ <b>Access Restricted</b>\n\n"
-                "You must join our channel to use the bot.\n\n"
+                "You must join every required chat to use the bot.\n\n"
                 "👇 Join below, then press <b>Try Again</b>",
                 reply_markup=get_join_keyboard(),
                 parse_mode="HTML"
@@ -436,8 +401,6 @@ async def start_cmd(message: Message, command: CommandObject):
         _get_or_create_user, telegram_id, username, full_name, ref_payload
     )
 
-    emoji, greeting = _time_greeting()
-
     try:
         result = await db_task
     except Exception:
@@ -447,24 +410,6 @@ async def start_cmd(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
         return
-
-    if result["is_new"]:
-        admin_greet = "👑 Welcome back, Admin!" if is_admin else "🎉 Welcome aboard!"
-        welcome_text = (
-            f"{_BOX_WELCOME}\n\n"
-            f"{emoji} {greeting}, <b>{safe(full_name)}</b>!\n"
-            f"{admin_greet}\n\n"
-            f"{_NEW_USER_GUIDE}"
-        )
-        if result["referral_bonus"]:
-            welcome_text += _NEW_REF_BONUS
-        welcome_text += (
-            f"\n{_DOUBLE_LINE}\n\n"
-            f"🔗 <b>Your Referral Code:</b>\n<code>{safe(result['referral_code'])}</code>\n\n"
-            f"<i>Share this code with friends to earn!</i>\n\n"
-            f"👇 <b>Your main menu is below:</b>"
-        )
-        await message.answer(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
     user = SimpleNamespace(**result["profile"])
     text = _build_start_welcome(user, full_name)
