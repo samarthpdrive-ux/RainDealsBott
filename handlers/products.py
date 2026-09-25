@@ -70,7 +70,6 @@ STOCK_NOTIFICATIONS = getattr(config, "STOCK_NOTIFICATIONS", True)
 GROUP_ID = getattr(config, "GROUP_ID", None)
 GROUP_NOTIFICATIONS = getattr(config, "GROUP_NOTIFICATIONS", False)
 ORDER_NOTIFICATION_CHANNEL_ID = getattr(config, "ORDER_NOTIFICATION_CHANNEL_ID", "")
-ADMIN_NOTIFICATION_CHANNEL_ID = getattr(config, "NOTIFICATION_CHANNEL_ID", "")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║            RESELLER LIVE STOCK CACHE & HELPERS               ║
@@ -2117,31 +2116,6 @@ async def _notify_stock_purchase(bot, buyer_id: int, result: dict):
         logger.exception("Failed to post stock update to %s", STOCK_GROUP_ID)
 
 
-async def _notify_admin_order_channel(bot, buyer_id: int, result: dict):
-    """Copy every successful purchase to the private admin-notification chat."""
-    if not ADMIN_NOTIFICATION_CHANNEL_ID:
-        return
-
-    try:
-        status = str(result.get("status") or "received").replace("_", " ").title()
-        await bot.send_message(
-            ADMIN_NOTIFICATION_CHANNEL_ID,
-            f"🛎 <b>ADMIN ORDER ALERT</b>\n\n"
-            f"🆔 Order: <code>#{result['order_id']}</code>\n"
-            f"👤 Buyer ID: <code>{buyer_id}</code>\n"
-            f"📦 Product: {result['name']}\n"
-            f"🔢 Quantity: {result['quantity']}x\n"
-            f"💰 Total: ${result['total_price']:.2f}\n"
-            f"📊 Status: <b>{status}</b>",
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.exception(
-            "Failed to post admin order alert to %s",
-            ADMIN_NOTIFICATION_CHANNEL_ID,
-        )
-
-
 # ╔══════════════════════════════════════════════════════════════╗
 # ║          DELIVERY INSTRUCTION BUTTON HANDLER                 ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -2537,7 +2511,6 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         if result.get("low_stock_alert"):
             await _notify_admins_low_stock(callback.bot, result["low_stock_alert"])
         await _notify_stock_purchase(callback.bot, telegram_id, result)
-        await _notify_admin_order_channel(callback.bot, telegram_id, result)
         if result["status"] in ("pending_manual", "preorder"):
             await _notify_admins_pending_order(callback.bot, telegram_id, result)
 
