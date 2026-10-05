@@ -1129,7 +1129,7 @@ async def _show_products_catalog(callback: CallbackQuery, products: list):
 
         keyboard.append([
             InlineKeyboardButton(
-                text=f"{p.icon or cat_config['icon']} {p.name} — ${price:.2f}{custom_badge}{bulk_badge} | {stock_badge}",
+                text=f"#{p.id} {p.icon or cat_config['icon']} {p.name} — ${price:.2f}{custom_badge}{bulk_badge} | {stock_badge}",
                 callback_data=f"product_{p.id}",
                 style=cat_config["style"],
             )
@@ -1540,6 +1540,7 @@ async def product_info(callback: CallbackQuery | Message, linked_product_id: int
         f"<blockquote>{description_block}</blockquote>\n\n"
         f"{_divider('─', 28)}\n\n"
         f"<b>📊 Product Info:</b>\n"
+        f"  🆔 <b>Product ID:</b> <code>{product.id}</code>\n"
     )
 
     if is_free:
