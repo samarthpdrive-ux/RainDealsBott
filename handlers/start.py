@@ -134,71 +134,41 @@ def _format_balance(raw_balance) -> str:
 # ╚══════════════════════════════════════════════════════════════╝
 
 def _build_audit_profile(user, telegram_id: int) -> str:
-    """Terminal audit-style profile dashboard."""
-    is_admin = telegram_id in ADMIN_IDS
-    is_banned = bool(getattr(user, 'is_banned', False))
+    """Build the branded marketplace profile card."""
     balance_raw = getattr(user, 'balance_display', getattr(user, 'balance', 0))
     balance_str = _format_balance(balance_raw)
-
-    ref_earnings = float(getattr(user, 'referral_earnings_display', 0))
-    total_dep = float(getattr(user, 'total_deposited', 0) or 0)
-    total_spent = float(getattr(user, 'total_spent', 0) or 0)
-    total_orders = getattr(user, 'total_orders', 0) or 0
-    total_refs = getattr(user, 'total_referrals', 0) or 0
-    ref_code = getattr(user, 'referral_code', 'N/A') or 'N/A'
-    member_since = _get_member_since(user)
-    username = str(getattr(user, 'username', '') or 'user')
-    full_name = str(getattr(user, 'full_name', 'Unknown'))
-
-    if is_banned:
-        role = "Banned"
-    elif is_admin:
-        role = "Administrator"
-    else:
-        role = "Standard"
-
-    if total_orders > 0:
-        avg_order = f"${(total_spent / total_orders):.2f}"
-    else:
-        avg_order = "$0.00"
-
-    try:
-        numeric_bal = float(balance_raw or 0)
-    except Exception:
-        numeric_bal = 0.0
+    total_orders = int(getattr(user, 'total_orders', 0) or 0)
+    rewards_str = _format_balance(getattr(user, 'referral_earnings_display', 0) or 0)
+    full_name = str(getattr(user, 'full_name', '') or 'there')
+    first_name = safe(full_name.split()[0])
 
     return (
-        f"<code>┌──({username}㉿Rain)-[/audit]</code>\n"
-        f"<code>└─$ sudo profilectl audit</code>\n"
-        f"<code>[sudo] password for {username}:</code>\n"
-        f"<code>************</code>\n"
-        f"<code>:: Authenticating identity...</code>\n"
-        f"<code>:: Mounting vault...</code>\n"
-        f"<code>:: Indexing ledger...</code>\n"
-        f"<code>:: Loading activity logs...</code>\n"
-        f"<code>:: Synchronizing referrals...</code>\n"
-        f"<code>{_DASH_LINE}</code>\n"
-        f"<code>PROFILE</code>\n"
-        f"<code>Name        {full_name}</code>\n"
-        f"<code>UID         {telegram_id}</code>\n"
-        f"<code>Role        {role}</code>\n"
-        f"<code>Joined      {member_since}</code>\n"
-        f"<code>{_DASH_LINE}</code>\n"
-        f"<code>ACCOUNT</code>\n"
-        f"<code>Balance     ${balance_str}</code>\n"
-        f"<code>Status      {_status(numeric_bal)}</code>\n"
-        f"<code>Deposited   ${total_dep:.2f}</code>\n"
-        f"<code>Spent       ${total_spent:.2f}</code>\n"
-        f"<code>Rewards     ${ref_earnings:.2f}</code>\n"
-        f"<code>{_DASH_LINE}</code>\n"
-        f"<code>NETWORK</code>\n"
-        f"<code>Orders      {total_orders}</code>\n"
-        f"<code>Avg Order   {avg_order}</code>\n"
-        f"<code>Referrals   {total_refs}</code>\n"
-        f"<code>Invite ID   {ref_code}</code>\n"
-        f"<code>{_DASH_LINE}</code>\n"
-        f"<code>Audit complete.</code>\n"
-        f"<code>root@Rain:~#</code>"
+        "🛍 <b>Rain Store</b>\n"
+        "Premium Digital Marketplace\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👋 Welcome back, <b>{first_name}</b>\n\n"
+        "💎 Standard Plan\n\n"
+        f"💰 Wallet: ${balance_str}\n"
+        f"📦 Orders: {total_orders}\n"
+        f"🎁 Rewards: ${rewards_str}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<blockquote>"
+        "✓ Verified Premium Products\n"
+        "✓ Instant Delivery\n"
+        "✓ Secure Payments\n"
+        "✓ Dedicated Customer Support"
+        "</blockquote>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<blockquote>"
+        "🛒 Shop — Browse premium digital products\n"
+        "💰 Deposit — Top up your wallet instantly\n"
+        "👤 Profile — Manage your account &amp; wallet\n"
+        "📦 Orders — View purchases &amp; product keys\n"
+        "📞 Support — Get help from our support team"
+        "</blockquote>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📢 Stay Updated: @Senacoun\n\n"
+        "👇 Tap a button below to get started."
     )
 
 
@@ -223,6 +193,19 @@ async def profile_back_cb(callback: CallbackQuery):
         await callback.message.delete()
     except Exception:
         pass
+
+
+@router.callback_query(F.data == "clear_start_menu")
+async def clear_start_menu(callback: CallbackQuery):
+    """Delete only the home-menu message containing the tapped button."""
+    try:
+        if callback.message:
+            await callback.message.delete()
+            await callback.answer("Menu cleared.")
+        else:
+            await callback.answer("This menu can no longer be cleared.", show_alert=True)
+    except Exception:
+        await callback.answer("Could not clear this menu. Please try again.", show_alert=True)
 
 
 @router.callback_query(F.data == "main_menu")
@@ -376,12 +359,22 @@ def _get_or_create_user(telegram_id: int, username: str, full_name: str, ref_pay
 @router.message(CommandStart())
 async def start_cmd(message: Message, command: CommandObject):
     telegram_id = message.from_user.id
+    start_payload = (command.args or "").strip() if command else ""
+    deep_link_product_id = None
+    if start_payload.startswith("product_"):
+        product_id_text = start_payload.removeprefix("product_")
+        if product_id_text.isdigit():
+            deep_link_product_id = int(product_id_text)
 
     # ═══════════════════════════════════════════════════════
     # CHANNEL MEMBERSHIP CHECK (skip for admins)
     # ═══════════════════════════════════════════════════════
     if telegram_id not in ADMIN_IDS:
-        is_member = await check_user_membership(message.bot, telegram_id)
+        is_member = await check_user_membership(
+            message.bot,
+            telegram_id,
+            fast=deep_link_product_id is not None,
+        )
         if not is_member:
             await message.answer(
                 "⚠️ <b>Access Restricted</b>\n\n"
@@ -394,7 +387,7 @@ async def start_cmd(message: Message, command: CommandObject):
 
     username = message.from_user.username
     full_name = message.from_user.full_name
-    ref_payload = (command.args or "").strip() if command else ""
+    ref_payload = "" if deep_link_product_id is not None else start_payload
     is_admin = telegram_id in ADMIN_IDS
 
     db_task = asyncio.to_thread(
@@ -412,6 +405,12 @@ async def start_cmd(message: Message, command: CommandObject):
         return
 
     user = SimpleNamespace(**result["profile"])
+    if deep_link_product_id is not None:
+        from handlers.products import product_info
+
+        await product_info(message, deep_link_product_id)
+        return
+
     text = _build_start_welcome(user, full_name)
     keyboard = get_admin_main_menu() if is_admin else get_main_menu()
     await message.answer(

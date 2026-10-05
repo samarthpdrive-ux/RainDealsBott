@@ -19,6 +19,7 @@ class Provider(Base):
     api_type: Mapped[str] = mapped_column(String(50), nullable=False, default="generic")
     auth_type: Mapped[str] = mapped_column(String(50), nullable=False, default="api_key")
     api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    api_secret: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     configuration: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -698,6 +698,13 @@ RESELLER_API_KEY = os.getenv(
     "",
 )
 
+RESELLER_API_SECRET = os.getenv(
+    "RESELLER_API_SECRET",
+    "",
+)
+
+UPSTREAM_CALLBACK_URL = os.getenv("UPSTREAM_CALLBACK_URL", "").strip()
+
 
 RESELLER_API_TIMEOUT = int(
     os.getenv(

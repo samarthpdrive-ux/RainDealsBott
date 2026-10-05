@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from html import escape as _esc
@@ -21,10 +22,13 @@ from sqlalchemy import func, and_
 
 from database import SessionLocal
 from models.order import Order
+from models.order_rating import OrderRating
 from models.product import Product
 from utils.ui import show, update_card
 
 router = Router()
+logger = logging.getLogger(__name__)
+SPENDS_PER_PAGE = 5
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║                     FSM STATES                              ║
@@ -39,13 +43,65 @@ class OrderFilterStates(StatesGroup):
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║              IN-MEMORY ORDER RATINGS STORE                  ║
+# ║                  ORDER SUPPORT STATE                       ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-_order_ratings: dict[int, dict] = {}
 _order_watchers: dict[int, set] = {}
-_ratings_lock = asyncio.Lock()
 _watchers_lock = asyncio.Lock()
+
+
+def _load_order_rating(order_id: int, telegram_id: int) -> int | None:
+    db = SessionLocal()
+    try:
+        rating = (
+            db.query(OrderRating.rating)
+            .filter(
+                OrderRating.order_id == order_id,
+                OrderRating.telegram_id == telegram_id,
+            )
+            .scalar()
+        )
+        return int(rating) if rating is not None else None
+    finally:
+        db.close()
+
+
+def _save_order_rating(order_id: int, telegram_id: int, rating: int) -> bool:
+    db = SessionLocal()
+    try:
+        order = (
+            db.query(Order)
+            .filter(Order.id == order_id, Order.telegram_id == telegram_id)
+            .with_for_update()
+            .first()
+        )
+        if not order or order.status != "completed":
+            return False
+
+        saved_rating = db.query(OrderRating).filter(OrderRating.order_id == order_id).first()
+        if saved_rating:
+            saved_rating.rating = rating
+        else:
+            db.add(OrderRating(order_id=order_id, telegram_id=telegram_id, rating=rating))
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _order_is_rateable(order_id: int, telegram_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        return db.query(Order.id).filter(
+            Order.id == order_id,
+            Order.telegram_id == telegram_id,
+            Order.status == "completed",
+        ).first() is not None
+    finally:
+        db.close()
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -262,7 +318,7 @@ async def support_menu_redirect(callback: CallbackQuery):
 # ║              FORMATTING FUNCTIONS                           ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-def _format_order(order: Order, detailed: bool = True) -> str:
+def _format_order(order: Order, detailed: bool = True, rating: int | None = None) -> str:
     """Format a single order with beautiful, color-coded output."""
 
     status_config = STATUS_CONFIG.get(
@@ -320,7 +376,6 @@ def _format_order(order: Order, detailed: bool = True) -> str:
         body += f"↩️ <b>Refunded:</b> {_format_timestamp(order.refunded_at)}\n"
 
     # Rating if exists
-    rating = _order_ratings.get(order.id, {}).get("rating")
     if rating:
         stars = "⭐" * rating + "☆" * (5 - rating)
         body += f"\n🌟 <b>Your Rating:</b> {stars}\n"
@@ -421,18 +476,7 @@ async def my_orders(callback: CallbackQuery):
     if not orders:
         await show(
             callback,
-            (
-                f"📦 <b>YOUR ORDERS</b>\n\n"
-                f"📭 <b>No orders yet!</b>\n\n"
-                f"{_divider('─')}\n\n"
-                f"🛍 <b>Ready to start?</b>\n\n"
-                f"  🛒 Browse our product catalog\n"
-                f"  💰 Find great deals\n"
-                f"  ⚡ Instant delivery available\n\n"
-                f"{_divider('─')}\n\n"
-                f"💡 <i>Your order history will\n"
-                f"appear here after your first purchase!</i>"
-            ),
+            "📦 <b>YOUR ORDERS</b>\n📭 No orders yet.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -460,16 +504,7 @@ async def my_orders(callback: CallbackQuery):
         )
         return
 
-    # Show formatted orders with analytics
-    text = _format_orders_summary(orders)
-
-    # Quick tips
-    text += (
-        "\n💡 <b>Pro Tips:</b>\n"
-        "• Tap order to view full details\n"
-        "• Use filters to find specific orders\n"
-        "• Export for your records 📤\n"
-    )
+    text = "📦 <b>YOUR ORDERS</b>\nTap a button below to view order details."
 
     # Create detailed order buttons
     recent_orders = orders[:10]
@@ -609,8 +644,10 @@ async def order_detail(callback: CallbackQuery):
         )
         return
 
-    # Format the detailed order
-    text = _format_order(order, detailed=True)
+    existing_rating = await asyncio.to_thread(
+        _load_order_rating, order.id, callback.from_user.id
+    )
+    text = _format_order(order, detailed=True, rating=existing_rating)
 
     # Status-specific messages
     text += f"\n{_divider('═')}\n"
@@ -703,7 +740,6 @@ async def order_detail(callback: CallbackQuery):
 
     # Rating for completed orders
     elif order.status == "completed":
-        existing_rating = _order_ratings.get(order.id, {}).get("rating")
         if not existing_rating:
             action_buttons.append([
                 InlineKeyboardButton(
@@ -729,6 +765,14 @@ async def order_detail(callback: CallbackQuery):
                     text="📎 Receipt",
                     callback_data=f"order_receipt_{order.id}",
                     style="primary"
+                )
+            ])
+        if product_id:
+            action_buttons.append([
+                InlineKeyboardButton(
+                    text="🔁 Buy Again",
+                    callback_data=f"reorder_{order.id}",
+                    style="success",
                 )
             ])
 
@@ -763,6 +807,118 @@ async def order_detail(callback: CallbackQuery):
     markup = InlineKeyboardMarkup(inline_keyboard=action_buttons)
 
     await show(callback, text, parse_mode="HTML", reply_markup=markup)
+
+
+def _load_user_spends(telegram_id: int, page: int):
+    db = SessionLocal()
+    try:
+        query = db.query(Order).filter(Order.telegram_id == telegram_id).order_by(Order.id.desc())
+        total = query.count()
+        orders = query.offset(page * SPENDS_PER_PAGE).limit(SPENDS_PER_PAGE).all()
+        return orders, total
+    finally:
+        db.close()
+
+
+@router.callback_query(F.data == "my_spends")
+async def my_spends(callback: CallbackQuery):
+    await _show_spends_page(callback, 0)
+
+
+@router.callback_query(F.data.startswith("spends_page_"))
+async def spends_page(callback: CallbackQuery):
+    try:
+        page = max(0, int(callback.data.rsplit("_", 1)[-1]))
+    except (ValueError, IndexError):
+        page = 0
+    await _show_spends_page(callback, page)
+
+
+async def _show_spends_page(callback: CallbackQuery, page: int):
+    await callback.answer()
+    orders, total = await asyncio.to_thread(_load_user_spends, callback.from_user.id, page)
+    pages = max(1, (total + SPENDS_PER_PAGE - 1) // SPENDS_PER_PAGE)
+    page = min(page, pages - 1)
+    if page and not orders:
+        orders, total = await asyncio.to_thread(_load_user_spends, callback.from_user.id, page)
+
+    lines = ["💸 <b>MY SPENDS</b>"]
+    if not orders:
+        lines.append("No purchases yet.")
+    else:
+        start = page * SPENDS_PER_PAGE + 1
+        lines.append(f"Showing {start}–{start + len(orders) - 1} of {total} purchases\n")
+        for order in orders:
+            status = STATUS_CONFIG.get(order.status, {}).get("label", order.status or "Unknown")
+            when = _format_timestamp(order.created_at, relative=True) if order.created_at else "Date unavailable"
+            lines.append(
+                f"🧾 <b>Order #{order.id}</b> — {_esc(order.product_name or 'Product')}\n"
+                f"└ ${float(order.amount):.2f} | {_esc(status)} | {when}"
+            )
+
+    keyboard = []
+    page_buttons = []
+    if page > 0:
+        page_buttons.append(InlineKeyboardButton(text="⬅ Previous", callback_data=f"spends_page_{page - 1}"))
+    if page < pages - 1:
+        page_buttons.append(InlineKeyboardButton(text="Next ➡", callback_data=f"spends_page_{page + 1}"))
+    if page_buttons:
+        keyboard.append(page_buttons)
+    keyboard.extend([
+        [InlineKeyboardButton(text="📥 My Deposits", callback_data="my_deposits")],
+        [InlineKeyboardButton(text="💰 Wallet", callback_data="deposit_start")],
+        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")],
+    ])
+    await show(
+        callback,
+        "\n\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+    )
+
+
+@router.callback_query(F.data.startswith("reorder_"))
+async def reorder_order(callback: CallbackQuery):
+    try:
+        order_id = int(callback.data.removeprefix("reorder_"))
+    except (TypeError, ValueError):
+        await callback.answer("Invalid order.", show_alert=True)
+        return
+
+    def _load_reorder_target():
+        db = SessionLocal()
+        try:
+            order = db.query(Order).filter(
+                Order.id == order_id,
+                Order.telegram_id == callback.from_user.id,
+                Order.status == "completed",
+            ).first()
+            if not order or not order.product_id:
+                return None
+            product = db.query(Product).filter(
+                Product.id == order.product_id,
+                Product.is_active == True,
+            ).first()
+            return product.id if product else None
+        finally:
+            db.close()
+
+    product_id = await asyncio.to_thread(_load_reorder_target)
+    if not product_id:
+        await callback.answer()
+        await show(
+            callback,
+            "This product is no longer available for reorder.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu")
+            ]]),
+        )
+        return
+
+    from handlers.products import product_info
+
+    await product_info(callback, product_id)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -895,11 +1051,12 @@ async def order_receipt(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("order_rate_"))
 async def order_rate(callback: CallbackQuery):
     """Show rating options for a completed order."""
-    await callback.answer()
-
     order_id = int(callback.data.split("_")[2])
-
-    existing = _order_ratings.get(order_id, {}).get("rating")
+    if not await asyncio.to_thread(_order_is_rateable, order_id, callback.from_user.id):
+        await callback.answer("Only your completed orders can be rated.", show_alert=True)
+        return
+    existing = await asyncio.to_thread(_load_order_rating, order_id, callback.from_user.id)
+    await callback.answer()
 
     text = (
         f"⭐ <b>RATE YOUR ORDER</b>\n\n"
@@ -965,22 +1122,27 @@ async def order_rate(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("rate_order_"))
 async def handle_order_rating(callback: CallbackQuery):
     """Save the user's rating for an order."""
-    await callback.answer()
-
     parts = callback.data.split("_")
     order_id = int(parts[2])
     rating = int(parts[3])
+    if rating not in range(1, 6):
+        await callback.answer("Invalid rating.", show_alert=True)
+        return
+    try:
+        saved = await asyncio.to_thread(
+            _save_order_rating, order_id, callback.from_user.id, rating
+        )
+    except Exception:
+        logger.exception("Failed to save rating for order %s", order_id)
+        await callback.answer("Could not save your rating. Please try again.", show_alert=True)
+        return
+    if not saved:
+        await callback.answer("Only your completed orders can be rated.", show_alert=True)
+        return
+    await callback.answer("Rating saved.")
 
     rating_labels = {1: "Terrible", 2: "Poor", 3: "Good", 4: "Great", 5: "Excellent"}
     rating_emoji = {1: "😡", 2: "😐", 3: "😊", 4: "😄", 5: "🌟"}
-
-    async with _ratings_lock:
-        _order_ratings[order_id] = {
-            "rating": rating,
-            "label": rating_labels[rating],
-            "timestamp": datetime.utcnow(),
-            "user_id": callback.from_user.id
-        }
 
     stars = "⭐" * rating + "☆" * (5 - rating)
 
@@ -1342,7 +1504,10 @@ async def handle_order_id_search(message: Message, state: FSMContext):
         )
         return
 
-    text = _format_order(order, detailed=True)
+    rating = await asyncio.to_thread(
+        _load_order_rating, order.id, message.from_user.id
+    )
+    text = _format_order(order, detailed=True, rating=rating)
 
     await message.answer(
         text,

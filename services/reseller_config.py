@@ -40,6 +40,7 @@ class ResellerConfig:
     endpoints: dict[str, str] = field(default_factory=dict)
     response_mappings: dict[str, Any] = field(default_factory=dict)
     is_active: bool = True
+    api_secret: str = ""
 
     def __repr__(self) -> str:
         """Safe representation hiding sensitive API key."""
@@ -68,6 +69,7 @@ class ResellerConfig:
             "name": self.name,
             "base_url": self.base_url,
             "api_key": "***REDACTED***",
+            "api_secret": "***REDACTED***",
             "api_type": self.api_type,
             "auth_type": self.auth_type,
             "auth_header_name": self.auth_header_name,
@@ -103,6 +105,12 @@ def _load_resellers_from_env() -> dict[str, ResellerConfig]:
         or os.getenv("RESELLER_API_KEY")
         or ""
     ).strip()
+    excalibur_api_secret = (
+        os.getenv("EXCALIBUR_RESELLER_API_SECRET")
+        or os.getenv("EXCALIBUR_API_SECRET")
+        or os.getenv("RESELLER_API_SECRET")
+        or ""
+    ).strip()
 
     excalibur_name = os.getenv("EXCALIBUR_RESELLER_NAME", "Excalibur Shop Bot")
 
@@ -122,6 +130,7 @@ def _load_resellers_from_env() -> dict[str, ResellerConfig]:
         name=excalibur_name,
         base_url=excalibur_base_url,
         api_key=excalibur_api_key,
+        api_secret=excalibur_api_secret,
         id="excalibur",
         api_type="excalibur",
         auth_type=excalibur_auth_type,
@@ -153,6 +162,7 @@ def _load_resellers_from_env() -> dict[str, ResellerConfig]:
 
             base_url = os.getenv(f"{prefix}BASE_URL", "").rstrip("/")
             api_key = os.getenv(f"{prefix}API_KEY", "").strip()
+            api_secret = os.getenv(f"{prefix}API_SECRET", "").strip()
             name = os.getenv(f"{prefix}NAME", f"Provider {provider_id.title()}")
             api_type = os.getenv(f"{prefix}TYPE", "reseller").lower()
 
@@ -188,6 +198,7 @@ def _load_resellers_from_env() -> dict[str, ResellerConfig]:
                     name=name,
                     base_url=base_url,
                     api_key=api_key,
+                    api_secret=api_secret,
                     id=provider_id,
                     api_type=api_type,
                     auth_type=auth_type,

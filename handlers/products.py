@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from html import escape as _esc
 from datetime import datetime
+from typing import Any
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -105,6 +107,7 @@ def _get_reseller_credentials(reseller_id: str | int | None = None) -> dict:
 
     base_url = None
     api_key = None
+    api_secret = None
     name = "Excalibur Shop Bot"
     res = None
 
@@ -117,12 +120,14 @@ def _get_reseller_credentials(reseller_id: str | int | None = None) -> dict:
     if res:
         base_url = getattr(res, "base_url", None) or (res.get("base_url") if isinstance(res, dict) else None)
         api_key = getattr(res, "api_key", None) or (res.get("api_key") if isinstance(res, dict) else None)
+        api_secret = getattr(res, "api_secret", None) or (res.get("api_secret") if isinstance(res, dict) else None)
         name = getattr(res, "name", None) or (res.get("name") if isinstance(res, dict) else "Reseller")
 
     if not base_url or not api_key:
         base_url = getattr(config, "RESELLER_BASE_URL", None) or getattr(config, "RESELLER_URL",
                                                                          None) or "https://arrsnetworkzone.in"
         api_key = getattr(config, "RESELLER_API_KEY", None) or getattr(config, "RESELLER_KEY", None)
+        api_secret = getattr(config, "RESELLER_API_SECRET", None)
         name = name or "Excalibur Shop Bot"
 
     clean_base_url = (base_url or "").replace("/docs", "").rstrip("/")
@@ -132,6 +137,7 @@ def _get_reseller_credentials(reseller_id: str | int | None = None) -> dict:
         "id": str(reseller_id) if reseller_id else "excalibur",
         "base_url": clean_base_url,
         "api_key": api_key,
+        "api_secret": api_secret,
         "name": name,
         "auth_type": "bearer" if is_em else "header",
     }
@@ -157,7 +163,44 @@ async def _call_reseller_place_order(manager, service_id: str, quantity: int, ex
         raise AttributeError("ResellerManager missing place_order method")
 
     if asyncio.iscoroutine(res):
-        return await res
+        res = await res
+
+    if not getattr(manager, "is_hmac_auth", False) or not isinstance(res, dict):
+        return res
+
+    order_id = res.get("order_id")
+    if not order_id:
+        return res
+
+    for _ in range(20):
+        fulfillment = res.get("fulfillment")
+        if isinstance(fulfillment, dict) and (fulfillment.get("payload") or fulfillment.get("delivery_data")):
+            return res
+
+        await asyncio.sleep(1)
+        details = await manager.get_order(str(order_id))
+        if not isinstance(details, dict):
+            continue
+
+        fulfillment = details.get("fulfillment")
+        delivered = None
+        if isinstance(fulfillment, dict):
+            delivered = fulfillment.get("payload") or fulfillment.get("delivery_data")
+
+        merged = dict(res)
+        merged.update(details)
+        if delivered:
+            merged["delivery"] = delivered
+            merged["delivery_items"] = delivered if isinstance(delivered, list) else [delivered]
+            return merged
+
+        status = str(details.get("status") or "").lower()
+        if status in {"canceled", "cancelled", "failed", "error"}:
+            raise ResellerAPIError(
+                message=f"Provider order {order_id} ended with status: {status}",
+                provider_id=getattr(manager, "provider_id", None),
+            )
+
     return res
 
 
@@ -418,6 +461,23 @@ def _stock_indicator(stock: int) -> str:
         return f"🟢 <b>Well Stocked</b> ({stock} available)"
 
 
+def _provider_stock_value(stock: Any) -> int:
+    if stock is None:
+        return 1
+    if isinstance(stock, bool):
+        return 1 if stock else 0
+    try:
+        value = int(stock)
+    except (TypeError, ValueError):
+        normalized = str(stock).strip().lower()
+        if normalized in {"out_of_stock", "oos", "unavailable", "disabled", "inactive", "false", "no"}:
+            return 0
+        if normalized in {"unlimited", "infinite", "infinity", "in_stock", "available", "active", "true", "yes"}:
+            return 1
+        return 1
+    return 1 if value < 0 else value
+
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║              BULK PRICING HELPERS                            ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -592,34 +652,51 @@ async def _get_purchase_lock(telegram_id: int) -> asyncio.Lock:
 
 _products_cache: dict = {"data": None, "timestamp": 0}
 _products_cache_lock = asyncio.Lock()
+_products_cache_state_lock = threading.Lock()
+_products_cache_generation = 0
+PRODUCTS_CACHE_TTL_SECONDS = 15
+
+
+def invalidate_products_cache() -> None:
+    global _products_cache_generation
+    with _products_cache_state_lock:
+        _products_cache_generation += 1
+        _products_cache["data"] = None
+        _products_cache["timestamp"] = 0
 
 
 async def _fetch_active_products():
-    """Cached product list — refreshes every 30 seconds. Excludes freebies (price=0)."""
+    """Return a short-lived cached catalog snapshot, excluding freebies."""
     async with _products_cache_lock:
-        now = asyncio.get_event_loop().time()
-        if _products_cache["data"] is not None and (now - _products_cache["timestamp"]) < 30:
-            return _products_cache["data"]
+        while True:
+            now = asyncio.get_running_loop().time()
+            with _products_cache_state_lock:
+                if (
+                    _products_cache["data"] is not None
+                    and now - _products_cache["timestamp"] < PRODUCTS_CACHE_TTL_SECONDS
+                ):
+                    return _products_cache["data"]
+                generation = _products_cache_generation
 
-    def _query():
-        db = SessionLocal()
-        try:
-            return (
-                db.query(Product)
-                .filter(Product.is_active == True, Product.price > 0)
-                .order_by(Product.id.asc())
-                .all()
-            )
-        finally:
-            db.close()
+            def _query():
+                db = SessionLocal()
+                try:
+                    return (
+                        db.query(Product)
+                        .filter(Product.is_active == True, Product.price > 0)
+                        .order_by(Product.id.asc())
+                        .all()
+                    )
+                finally:
+                    db.close()
 
-    products = await asyncio.to_thread(_query)
-
-    async with _products_cache_lock:
-        _products_cache["data"] = products
-        _products_cache["timestamp"] = asyncio.get_event_loop().time()
-
-    return products
+            products = await asyncio.to_thread(_query)
+            with _products_cache_state_lock:
+                if generation != _products_cache_generation:
+                    continue
+                _products_cache["data"] = products
+                _products_cache["timestamp"] = asyncio.get_running_loop().time()
+                return products
 
 
 def _fetch_product(product_id: int):
@@ -680,7 +757,8 @@ def _real_stock(product) -> int:
             return fallback_stock
 
         if service_id in _reseller_stock_cache:
-            return _reseller_stock_cache[service_id]
+            live_stock = _reseller_stock_cache[service_id]
+            return min(live_stock, fallback_stock) if fallback_stock < 999999 else live_stock
 
         return fallback_stock
 
@@ -711,6 +789,8 @@ def _get_max_qty(product) -> int:
 _stock_state: dict[int, dict] = {}
 _stock_state_lock = asyncio.Lock()
 _stock_scan_seeded = False
+_stock_bot_username: str | None = None
+_stock_bot_username_lock = asyncio.Lock()
 
 
 def _stockctl_block(
@@ -751,53 +831,107 @@ def _stockctl_block(
 
 
 def _stock_event_text(kind: str, product, **kwargs) -> str:
+    stock = kwargs.get("stock", 0)
+    category = _get_category_config(product.category)["label"]
+    price = _money(product.price)
+
     if kind == "new_product":
-        stock = kwargs["stock"]
-        status = "IN STOCK" if stock > 0 else "OUT OF STOCK"
-        return _stockctl_block(
-            action="add",
-            steps=["[LOAD] Product Loaded", "[SYNC] Stock Database Updated", "[READY] Marketplace Refreshed"],
-            product=product,
-            status_label=status,
-            closing="Stock committed.",
-            extra_fields=[("Stock", str(stock))],
+        return (
+            f"🆕 <b>NEW PRODUCT</b>\n\n"
+            f"📦 <b>{_esc(product.name)}</b>\n"
+            f"🏷 Category: {_esc(category)}\n"
+            f"💎 Price: <b>${price:.2f}</b>\n"
+            f"📊 Available: <b>{stock}</b>\n\n"
+            "Tap below to view and order."
         )
 
     if kind == "restock":
         added = kwargs["added"]
-        stock = kwargs["stock"]
-        status = "IN STOCK" if stock > 0 else "OUT OF STOCK"
-        return _stockctl_block(
-            action="restock",
-            steps=["[RESTOCK] Inventory Replenished", "[SYNC] Stock Database Updated", "[READY] Marketplace Refreshed"],
-            product=product,
-            status_label=status,
-            closing="Stock committed.",
-            extra_fields=[("Added", f"+{added}"), ("Stock", str(stock))],
+        return (
+            f"🔥 <b>BACK IN STOCK</b>\n\n"
+            f"📦 <b>{_esc(product.name)}</b>\n\n"
+            f"🟢 Freshly restocked — <b>+{added}</b> now available.\n"
+            f"💎 Price: <b>${price:.2f}</b>\n"
+            f"📊 Total available: <b>{stock}</b>\n\n"
+            "Order before it runs out again."
         )
 
     if kind == "limited_stock":
-        stock = kwargs["stock"]
-        status = "LIMITED STOCK" if stock > 0 else "OUT OF STOCK"
-        return _stockctl_block(
-            action="update",
-            steps=["[LOAD] Product Loaded", "[SYNC] Stock Database Updated", "[READY] Marketplace Refreshed"],
-            product=product,
-            status_label=status,
-            closing="Stock committed.",
-            extra_fields=[("Stock", str(stock))],
+        return (
+            f"⚠️ <b>LOW STOCK</b>\n\n"
+            f"📦 <b>{_esc(product.name)}</b>\n"
+            f"💎 Price: <b>${price:.2f}</b>\n"
+            f"📊 Only <b>{stock}</b> left."
         )
 
     return ""
 
 
-async def _send_stock_channel_message(bot, text: str):
-    if not (STOCK_NOTIFICATIONS and STOCK_GROUP_ID and text):
+async def _send_stock_channel_message(bot, text: str, product_id: int | None = None, can_buy: bool = True):
+    """Queue stock posts so Telegram network latency never blocks bot actions."""
+    if not text:
         return
+
+    destinations = []
+    if STOCK_NOTIFICATIONS and STOCK_GROUP_ID:
+        destinations.append(STOCK_GROUP_ID)
+    if GROUP_NOTIFICATIONS and GROUP_ID and str(GROUP_ID) not in {str(target) for target in destinations}:
+        destinations.append(GROUP_ID)
+    if not destinations:
+        return
+
+    task = asyncio.create_task(
+        _deliver_stock_channel_message(bot, text, destinations, product_id, can_buy)
+    )
+    task.add_done_callback(_log_stock_notification_task)
+
+
+async def _deliver_stock_channel_message(bot, text: str, destinations: list, product_id: int | None, can_buy: bool):
+    global _stock_bot_username
+    markup = None
+    if product_id is not None and can_buy:
+        try:
+            if not _stock_bot_username:
+                async with _stock_bot_username_lock:
+                    if not _stock_bot_username:
+                        me = await bot.get_me()
+                        _stock_bot_username = me.username
+            if _stock_bot_username:
+                markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🛍 Buy now",
+                        url=f"https://t.me/{_stock_bot_username}?start=product_{product_id}",
+                    )
+                ]])
+        except Exception:
+            logger.exception("Could not create product deep link for stock notification")
+
+    results = await asyncio.gather(
+        *(
+            bot.send_message(target, text, parse_mode="HTML", reply_markup=markup)
+            for target in destinations
+        ),
+        return_exceptions=True,
+    )
+    for target, result in zip(destinations, results):
+        if isinstance(result, Exception):
+            logger.error("Failed to send stock notification to %s: %s", target, result)
+
+
+def _log_stock_notification_task(task: asyncio.Task):
     try:
-        await bot.send_message(STOCK_GROUP_ID, text, parse_mode="HTML")
+        task.result()
     except Exception:
-        logger.exception("Failed to send stock channel notification")
+        logger.exception("Unexpected error while delivering stock notifications")
+
+
+async def _refresh_and_scan_product(bot, product_id: int):
+    try:
+        product = await asyncio.to_thread(_fetch_product, product_id)
+        if product:
+            _fire_stock_scan(bot, [product])
+    except Exception:
+        logger.exception("Could not refresh product stock after purchase")
 
 
 async def _scan_stock_changes(bot, products: list):
@@ -842,7 +976,12 @@ async def _scan_stock_changes(bot, products: list):
         _stock_scan_seeded = True
 
     for kind, product, kwargs in events:
-        await _send_stock_channel_message(bot, _stock_event_text(kind, product, **kwargs))
+        await _send_stock_channel_message(
+            bot,
+            _stock_event_text(kind, product, **kwargs),
+            product_id=product.id,
+            can_buy=kwargs.get("stock", 0) > 0,
+        )
 
 
 def _fire_stock_scan(bot, products: list):
@@ -863,7 +1002,12 @@ async def notify_new_product(bot, product):
             "low_stock_notified": stock <= threshold,
         }
 
-    await _send_stock_channel_message(bot, _stock_event_text("new_product", product, stock=stock))
+    await _send_stock_channel_message(
+        bot,
+        _stock_event_text("new_product", product, stock=stock),
+        product_id=product.id,
+        can_buy=stock > 0,
+    )
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -941,65 +1085,39 @@ async def freebies_menu(callback: CallbackQuery):
 @router.callback_query(F.data == "products_menu")
 async def products_menu(callback: CallbackQuery):
     await callback.answer()
+    await _show_products_catalog(callback, await _fetch_active_products())
 
-    products = await _fetch_active_products()
 
+async def _show_products_catalog(callback: CallbackQuery, products: list):
     if not products:
         await show(
             callback,
-            (
-                f"📦 <b>PRODUCTS</b>\n\n"
-                f"📭 <b>No paid products available right now.</b>\n\n"
-                f"{_divider('─', 28)}\n\n"
-                f"💡 Check back later or contact support\n"
-                f"for more information about upcoming products."
-            ),
+            "📦 <b>PRODUCTS</b>\n\n📭 <b>No paid products available right now.</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🎁 Check Freebies", callback_data="freebies_menu", style="success")],
-                    [InlineKeyboardButton(text="🆘 Contact Support", callback_data="support_menu", style="danger")],
-                    [InlineKeyboardButton(text="🏠 Back to Menu", callback_data="main_menu", style="primary")]
-                ]
-            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⬅ Go Back", callback_data="main_menu", style="primary")
+            ]]),
         )
         return
+
+    visible_products = products
 
     # Never hold up the customer catalog for a reseller API call. Local
     # products render immediately from the database cache; reseller stock is
     # refreshed in the background and keeps its last known value meanwhile.
-    if any((getattr(product, "source", "own") or "own") == "reseller" for product in products):
+    if any((getattr(product, "source", "own") or "own") == "reseller" for product in visible_products):
         asyncio.create_task(_refresh_reseller_stock_cache_if_needed())
 
-    _fire_stock_scan(callback.bot, products)
+    _fire_stock_scan(callback.bot, visible_products)
     custom_prices = await asyncio.to_thread(
-        _get_catalog_custom_prices, callback.from_user.id, [product.id for product in products]
+        _get_catalog_custom_prices, callback.from_user.id, [product.id for product in visible_products]
     )
 
-    categories = {}
-    for p in products:
-        cat_config = _get_category_config(p.category)
-        cat_key = cat_config["label"]
-        if cat_key not in categories:
-            categories[cat_key] = {"count": 0, "config": cat_config}
-        categories[cat_key]["count"] += 1
-
-    text = (
-        f"🛍 <b>PRODUCT CATALOG</b>\n\n"
-        f"<b>📊 Available Products:</b> {len(products)}\n"
-        f"<i>🎁 Free products available in Freebies section</i>\n\n"
-        f"{_divider('─', 28)}\n"
-        f"<b>📂 Categories:</b>\n"
-    )
-
-    for cat_name, cat_data in sorted(categories.items()):
-        cfg = cat_data["config"]
-        text += f"  {cfg['color']} {cfg['icon']} <b>{cat_name}</b> — {cat_data['count']} items\n"
-
-    text += f"\n{_divider('═', 28)}\n\n<b>👇 Select a product below:</b>"
+    text = "<b>Available products</b>\nPlease select a product to proceed"
 
     keyboard = []
-    for p in products:
+
+    for p in visible_products:
         cat_config = _get_category_config(p.category)
         stock = _real_stock(p)
         custom_price = custom_prices.get(p.id)
@@ -1017,17 +1135,10 @@ async def products_menu(callback: CallbackQuery):
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(text="🔍 Search", callback_data="search_start", style="primary"),
-        InlineKeyboardButton(text="⭐ Favorites", callback_data="favorites_menu", style="success"),
-    ])
-    keyboard.append([
-        InlineKeyboardButton(text="🎁 Freebies", callback_data="freebies_menu", style="primary"),
-    ])
-    keyboard.append([
-        InlineKeyboardButton(text="📜 My Orders", callback_data="orders_menu", style="primary"),
-        InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary"),
-    ])
+    navigation = [InlineKeyboardButton(
+        text="⬅ Go Back", callback_data="main_menu", style="primary"
+    )]
+    keyboard.append(navigation)
 
     await show(callback, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
@@ -1366,25 +1477,35 @@ async def search_results(message: Message, state: FSMContext):
 # ╚══════════════════════════════════════════════════════════════╝
 
 @router.callback_query(F.data.startswith("product_"))
-async def product_info(callback: CallbackQuery):
-    await callback.answer()
-    product_id = int(callback.data.split("_")[1])
+async def product_info(callback: CallbackQuery | Message, linked_product_id: int | None = None):
+    is_callback = isinstance(callback, CallbackQuery)
+    if is_callback:
+        await callback.answer()
+    product_id = linked_product_id if linked_product_id is not None else int(callback.data.split("_")[1])
 
-    await _refresh_reseller_stock_cache_if_needed()
-    product = await asyncio.to_thread(_fetch_product, product_id)
     user_id = callback.from_user.id
-    custom_price = await asyncio.to_thread(_get_custom_price, user_id, product_id)
+    if linked_product_id is not None:
+        product, custom_price = await asyncio.gather(
+            asyncio.to_thread(_fetch_product, product_id),
+            asyncio.to_thread(_get_custom_price, user_id, product_id),
+        )
+        if product and (getattr(product, "source", "own") or "own") == "reseller":
+            asyncio.create_task(_refresh_reseller_stock_cache_if_needed())
+    else:
+        await _refresh_reseller_stock_cache_if_needed()
+        product = await asyncio.to_thread(_fetch_product, product_id)
+        custom_price = await asyncio.to_thread(_get_custom_price, user_id, product_id)
 
     if not product:
-        await show(callback,
-                   f"❌ <b>NOT FOUND</b>\n\n<b>This product is no longer available.</b>",
-                   parse_mode="HTML",
-                   reply_markup=InlineKeyboardMarkup(
-                       inline_keyboard=[
-                           [InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu",
-                                                 style="primary")],
-                           [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
-                       ]))
+        not_found_text = "❌ <b>NOT FOUND</b>\n\n<b>This product is no longer available.</b>"
+        not_found_markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu", style="primary")],
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")],
+        ])
+        if is_callback:
+            await show(callback, not_found_text, parse_mode="HTML", reply_markup=not_found_markup)
+        else:
+            await callback.answer(not_found_text, parse_mode="HTML", reply_markup=not_found_markup)
         return
 
     _fire_stock_scan(callback.bot, [product])
@@ -1493,7 +1614,11 @@ async def product_info(callback: CallbackQuery):
         InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary"),
     ])
 
-    await show(callback, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if is_callback:
+        await show(callback, text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await callback.answer(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -1877,13 +2002,14 @@ def _do_purchase(
                                "threshold": threshold}
 
         result = {
-            "order_id": order.id, "icon": product.icon, "name": product.name,
+            "order_id": order.id, "product_id": product.id, "icon": product.icon, "name": product.name,
             "delivered_accounts": delivered_accounts, "balance": user.balance,
             "stock": new_stock, "status": status, "is_preorder": is_preorder_order,
             "quantity": quantity, "total_price": total_amount, "price_per_unit": price,
             "low_stock_alert": low_stock_alert, "referral_commission_paid": referral_commission_paid,
             "delivery_instruction": product.delivery_instruction,
         }
+    invalidate_products_cache()
     return result
 
 
@@ -1913,8 +2039,9 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
 
         await _refresh_reseller_stock_cache_if_needed()
         db_stock = getattr(product, "stock", 0)
-        fallback_stk = db_stock if (db_stock is not None and db_stock > 0) else 999999
-        available_stock = _reseller_stock_cache.get(service_id, fallback_stk)
+        fallback_stk = db_stock if db_stock is not None else 999999
+        live_stock = _reseller_stock_cache.get(service_id, fallback_stk)
+        available_stock = min(live_stock, fallback_stk) if fallback_stk < 999999 else live_stock
 
         if available_stock > 0 and available_stock < quantity:
             return {"error": f"Only {available_stock} left in stock with supplier."}
@@ -2000,9 +2127,20 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
     elif isinstance(api_response, str):
         delivered_list = [api_response]
 
-    if not delivered_list:
+    is_async_provider_order = bool(
+        getattr(manager, "is_hmac_auth", False)
+        and isinstance(api_response, dict)
+        and api_response.get("order_id")
+        and not delivered_list
+    )
+    if not delivered_list and not is_async_provider_order:
         logger.error("Reseller API returned success but no products/codes: %s", api_response)
         return {"error": "❌ Supplier returned no product codes. Your balance was not charged."}
+
+    provider_order_id = None
+    if isinstance(api_response, dict):
+        provider_order_id = api_response.get("order_id") or api_response.get("order_no")
+    local_provider_id = int(creds["id"]) if str(creds.get("id", "")).isdigit() else None
 
     def _finalize_db_transaction():
         with transaction() as db:
@@ -2014,7 +2152,11 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
             u.total_orders += 1
             u.total_spent = _money(u.total_spent) + total_amount
 
-            delivered_text = "\n".join(delivered_list)
+            purchased_product = db.query(Product).filter(Product.id == product_id).with_for_update().first()
+            if purchased_product is not None and purchased_product.stock is not None and purchased_product.stock < 999999:
+                purchased_product.stock = max(0, purchased_product.stock - quantity)
+
+            delivered_text = "\n".join(delivered_list) if delivered_list else None
 
             order = Order(
                 telegram_id=u.telegram_id,
@@ -2025,8 +2167,11 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
                 quantity=quantity,
                 delivery_type="automatic",
                 is_preorder=False,
-                status="completed",
-                refunded=False
+                status="processing" if is_async_provider_order else "completed",
+                refunded=False,
+                reseller_id=local_provider_id,
+                reseller_service_id=service_id,
+                reseller_order_id=external_order_id if is_async_provider_order else str(provider_order_id or external_order_id),
             )
             db.add(order)
             db.flush()
@@ -2043,16 +2188,19 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
                         referral_commission_paid = {"referrer_telegram_id": referrer.telegram_id, "amount": commission}
 
             stock_left = _reseller_stock_cache.get(service_id, fallback_stk)
+            if purchased_product is not None and purchased_product.stock is not None and purchased_product.stock < 999999:
+                stock_left = min(stock_left, purchased_product.stock)
             stock_disp = "In Stock" if stock_left >= 999999 else stock_left
 
             return {
                 "order_id": order.id,
+                "product_id": product_id,
                 "icon": product_icon,
                 "name": product_name,
                 "delivered_accounts": delivered_list,
                 "balance": u.balance,
                 "stock": stock_disp,
-                "status": "completed",
+                "status": "processing" if is_async_provider_order else "completed",
                 "is_preorder": False,
                 "quantity": quantity,
                 "total_price": total_amount,
@@ -2064,6 +2212,15 @@ async def _do_reseller_purchase(telegram_id: int, product_id: int, quantity: int
 
     try:
         result = await asyncio.to_thread(_finalize_db_transaction)
+        if service_id in _reseller_stock_cache and _reseller_stock_cache[service_id] < 999999:
+            _reseller_stock_cache[service_id] = max(
+                0, _reseller_stock_cache[service_id] - quantity
+            )
+            result["stock"] = min(
+                _reseller_stock_cache[service_id],
+                result["stock"] if isinstance(result["stock"], int) else _reseller_stock_cache[service_id],
+            )
+        invalidate_products_cache()
         return result
     except Exception:
         logger.exception("Error finalizing local order after successful reseller order")
@@ -2083,22 +2240,31 @@ async def _notify_admins_low_stock(bot, alert: dict):
 
 
 async def _notify_stock_purchase(bot, buyer_id: int, result: dict):
-    """Send the remaining stock to the dedicated stock channel after a sale."""
-    if not (STOCK_NOTIFICATIONS and STOCK_GROUP_ID):
-        return
+    """Announce a completed purchase without exposing buyer/order details."""
+    stock = result.get("stock")
+    has_stock = stock == "In Stock" or (isinstance(stock, (int, float)) and stock > 0)
+    await _send_stock_channel_message(
+        bot,
+        f"🛍 <b>PRODUCT PURCHASED</b>\n\n"
+        f"📦 <b>{_esc(result['name'])}</b>\n"
+        f"➖ Quantity sold: <b>{result['quantity']}x</b>\n"
+        f"📊 Remaining stock: <b>{result.get('stock', 'Unknown')}</b>",
+        product_id=result.get("product_id"),
+        can_buy=has_stock,
+    )
 
+
+async def _notify_referral_commission(bot, commission: dict):
     try:
         await bot.send_message(
-            STOCK_GROUP_ID,
-            f"📦 <b>STOCK UPDATED</b>\n\n"
-            f"🆔 Order: <code>#{result['order_id']}</code>\n"
-            f"📦 Product: {result['name']}\n"
-            f"➖ Sold: {result['quantity']}x\n"
-            f"📊 Remaining: <b>{result.get('stock', 'Unknown')}</b>",
+            commission["referrer_telegram_id"],
+            f"🎉 <b>Referral Commission Earned!</b>\n\n{_divider('─', 22)}\n\n"
+            f"💵 <b>Amount:</b> ${commission['amount']:.2f}\n👤 <b>From:</b> A user you referred\n\n"
+            f"<i>Thanks for sharing your link! 🙏</i>",
             parse_mode="HTML",
         )
     except Exception:
-        logger.exception("Failed to post stock update to %s", STOCK_GROUP_ID)
+        logger.exception("Failed to notify referrer %s", commission.get("referrer_telegram_id"))
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -2327,7 +2493,11 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         is_free = float(result.get("total_price", 0)) == 0
         delivery_instruction = result.get("delivery_instruction")
 
-        def _build_success_keyboard(product_id: int, has_instruction: bool) -> InlineKeyboardMarkup:
+        def _build_success_keyboard(
+            product_id: int,
+            order_id: int,
+            has_instruction: bool,
+        ) -> InlineKeyboardMarkup:
             buttons = []
             if has_instruction:
                 buttons.append([
@@ -2337,6 +2507,13 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                         style="primary"
                     )
                 ])
+            buttons.append([
+                InlineKeyboardButton(
+                    text="⭐ Rate This Purchase",
+                    callback_data=f"order_rate_{order_id}",
+                    style="success",
+                )
+            ])
             buttons.append([
                 InlineKeyboardButton(text="📜 View Orders", callback_data="orders_menu", style="success"),
                 InlineKeyboardButton(text="🛍 Buy More", callback_data="products_menu", style="primary")
@@ -2392,7 +2569,7 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                 if has_instr:
                     text += f"\n\n📋 <b>⚠️ Important:</b> Tap <b>Delivery Instructions</b> below!"
 
-            reply_markup = _build_success_keyboard(product_id, has_instr)
+            reply_markup = _build_success_keyboard(product_id, result["order_id"], has_instr)
 
         elif result["status"] == "preorder":
             if is_free:
@@ -2494,21 +2671,16 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         await show(callback, text, parse_mode="HTML", reply_markup=reply_markup)
 
         if result.get("low_stock_alert"):
-            await _notify_admins_low_stock(callback.bot, result["low_stock_alert"])
-        await _notify_stock_purchase(callback.bot, telegram_id, result)
-        fresh_product = await asyncio.to_thread(_fetch_product, product_id)
-        if fresh_product:
-            _fire_stock_scan(callback.bot, [fresh_product])
+            task = asyncio.create_task(_notify_admins_low_stock(callback.bot, result["low_stock_alert"]))
+            task.add_done_callback(_log_stock_notification_task)
+        task = asyncio.create_task(_notify_stock_purchase(callback.bot, telegram_id, result))
+        task.add_done_callback(_log_stock_notification_task)
+        asyncio.create_task(_refresh_and_scan_product(callback.bot, product_id))
 
         commission = result.get("referral_commission_paid")
         if commission:
-            try:
-                await callback.bot.send_message(commission["referrer_telegram_id"],
-                                                f"🎉 <b>Referral Commission Earned!</b>\n\n{_divider('─', 22)}\n\n"
-                                                f"💵 <b>Amount:</b> ${commission['amount']:.2f}\n👤 <b>From:</b> A user you referred\n\n"
-                                                f"<i>Thanks for sharing your link! 🙏</i>", parse_mode="HTML")
-            except Exception:
-                logger.exception("Failed to notify referrer %s of commission", commission["referrer_telegram_id"])
+            task = asyncio.create_task(_notify_referral_commission(callback.bot, commission))
+            task.add_done_callback(_log_stock_notification_task)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -2568,8 +2740,15 @@ async def _fetch_and_show_reseller_products(callback: CallbackQuery, reseller_id
                 or reseller_data.get("data", [])
             )
 
+        services = [
+            service for service in services
+            if isinstance(service, dict)
+            and service.get("is_available") is not False
+            and _provider_stock_value(service.get("stock")) > 0
+        ]
+
         if not services:
-            await loading_message.edit_text("📭 No products found from this provider.")
+            await loading_message.edit_text("📭 No in-stock products found from this provider.")
             return
 
         text = (

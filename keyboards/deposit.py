@@ -54,6 +54,11 @@ def get_deposit_menu() -> InlineKeyboardMarkup:
                     callback_data="my_deposits",
                     style="success"
                 ),
+                InlineKeyboardButton(
+                    text="💸 My Spends",
+                    callback_data="my_spends",
+                    style="primary"
+                ),
             ],
             # ── Navigation ──
             [

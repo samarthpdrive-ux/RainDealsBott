@@ -11,6 +11,7 @@ from config import ADMIN_IDS
 from models.deposit import Deposit
 
 router = Router()
+ADMIN_DEPOSITS_PER_PAGE = 10
 
 
 def is_admin(user_id: int):
@@ -43,6 +44,7 @@ def _admin_deposit_amount(deposit) -> str:
 @router.callback_query(
     F.data == "admin_deposits"
 )
+@router.callback_query(F.data.startswith("admin_deposits_page_"))
 async def admin_deposits(
         callback: CallbackQuery
 ):
@@ -57,18 +59,26 @@ async def admin_deposits(
         )
         return
 
+    try:
+        page = int(callback.data.rsplit("_", 1)[-1]) if callback.data != "admin_deposits" else 0
+        page = max(0, page)
+    except ValueError:
+        page = 0
+
     db = SessionLocal()
 
     try:
 
-        deposits = (
+        query = (
             db.query(Deposit)
             .order_by(
                 Deposit.id.desc()
             )
-            .limit(50)
-            .all()
         )
+        total = query.count()
+        total_pages = max(1, (total + ADMIN_DEPOSITS_PER_PAGE - 1) // ADMIN_DEPOSITS_PER_PAGE)
+        page = min(page, total_pages - 1)
+        deposits = query.offset(page * ADMIN_DEPOSITS_PER_PAGE).limit(ADMIN_DEPOSITS_PER_PAGE).all()
 
         if not deposits:
 
@@ -113,11 +123,18 @@ async def admin_deposits(
                         ),
 
                         callback_data=
-                        f"deposit_{deposit.id}"
+                        f"deposit_{deposit.id}_{page}"
                     )
                 ]
             )
 
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="⬅ Previous", callback_data=f"admin_deposits_page_{page - 1}"))
+        if page < total_pages - 1:
+            navigation.append(InlineKeyboardButton(text="Next ➡", callback_data=f"admin_deposits_page_{page + 1}"))
+        if navigation:
+            keyboard.append(navigation)
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -128,7 +145,7 @@ async def admin_deposits(
         )
 
         await callback.message.edit_text(
-            "💰 Latest Deposits",
+            f"💰 Deposits ({page + 1}/{total_pages}) — {total} total",
             reply_markup=
             InlineKeyboardMarkup(
                 inline_keyboard=keyboard
@@ -154,9 +171,9 @@ async def deposit_info(
         callback: CallbackQuery
 ):
 
-    deposit_id = int(
-        callback.data.split("_")[1]
-    )
+    parts = callback.data.split("_")
+    deposit_id = int(parts[1])
+    list_page = int(parts[2]) if len(parts) > 2 else 0
 
     db = SessionLocal()
 
@@ -205,7 +222,7 @@ async def deposit_info(
                 InlineKeyboardButton(
                     text="⬅ Back",
                     callback_data=
-                    "admin_deposits"
+                    "admin_deposits" if list_page == 0 else f"admin_deposits_page_{list_page}"
                 )
             ]
         ]

@@ -6,45 +6,59 @@ def get_main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🛍 Shop Products",
+                    text="🛍 SHOP",
                     callback_data="products_menu",
                     style="primary",
-                ),
-                InlineKeyboardButton(
-                    text="🎁 Refer & Earn",
-                    callback_data="referrals_menu",
-                    style="success",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📦 My Orders",
-                    callback_data="orders_menu",
-                    style="primary",
-                ),
-                InlineKeyboardButton(
-                    text="💰 My Wallet",
+                    text="💳 Wallet",
                     callback_data="deposit_start",
-                    style="primary",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🆘 Help & Support",
-                    callback_data="support_ticket",
-                    style="primary",
+                    style="success",
                 ),
                 InlineKeyboardButton(
-                    text="👤 My Profile",
+                    text="🎁 Freebies",
+                    callback_data="freebies_menu",
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    text="👤 Profile",
                     callback_data="my_profile",
                     style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🔑 API Access",
+                    text="🎯 Referral Store",
+                    callback_data="referrals_menu",
+                    style="primary",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🆘 Support",
+                    callback_data="support_ticket",
+                    style="primary",
+                ),
+                InlineKeyboardButton(
+                    text="📦 My Orders",
+                    callback_data="orders_menu",
+                    style="primary",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Reseller API",
                     callback_data="api_key_menu",
                     style="primary",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧹 Clear Menu",
+                    callback_data="clear_start_menu",
+                    style="danger",
                 )
             ]
         ]
@@ -56,46 +70,60 @@ def get_admin_main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🛍 Shop Products",
+                    text="🛍 SHOP",
                     callback_data="products_menu",
                     style="primary",
-                ),
-                InlineKeyboardButton(
-                    text="🎁 Refer & Earn",
-                    callback_data="referrals_menu",
-                    style="success",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📦 My Orders",
-                    callback_data="orders_menu",
-                    style="primary",
-                ),
-                InlineKeyboardButton(
-                    text="💰 My Wallet",
+                    text="💳 Wallet",
                     callback_data="deposit_start",
-                    style="primary",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🆘 Help & Support",
-                    callback_data="support_ticket",
-                    style="primary",
+                    style="success",
                 ),
                 InlineKeyboardButton(
-                    text="👤 My Profile",
+                    text="🎁 Freebies",
+                    callback_data="freebies_menu",
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    text="👤 Profile",
                     callback_data="my_profile",
                     style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🔑 API Access",
+                    text="🎯 Referral Store",
+                    callback_data="referrals_menu",
+                    style="primary",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🆘 Support",
+                    callback_data="support_ticket",
+                    style="primary",
+                ),
+                InlineKeyboardButton(
+                    text="📦 My Orders",
+                    callback_data="orders_menu",
+                    style="primary",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Reseller API",
                     callback_data="api_key_menu",
                     style="primary",
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧹 Clear Menu",
+                    callback_data="clear_start_menu",
+                    style="danger",
+                )
             ],
             [
                 InlineKeyboardButton(

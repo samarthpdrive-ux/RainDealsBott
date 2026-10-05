@@ -12,12 +12,15 @@ Compatible with Excalibur Shop Bot API, EM Store, Canboso Telegram Buyer API, an
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import re
 import logging
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlsplit
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -78,8 +81,14 @@ class ResellerManager:
 
         resolved_api_key = (
                 api_key
-                or self.config_dict.get("api_key")
                 or (getattr(self.config, "api_key", None) if not isinstance(self.config, dict) else None)
+                or self.config_dict.get("api_key")
+                or ""
+        )
+
+        resolved_api_secret = (
+                (getattr(self.config, "api_secret", None) if not isinstance(self.config, dict) else None)
+                or self.config_dict.get("api_secret")
                 or ""
         )
 
@@ -91,6 +100,7 @@ class ResellerManager:
 
         self.base_url = str(resolved_base_url).strip()
         self.api_key = str(resolved_api_key).strip()
+        self.api_secret = str(resolved_api_secret).strip()
 
         self.provider_id = str(
             self.config_dict.get("id")
@@ -129,6 +139,13 @@ class ResellerManager:
         else:
             self.auth_type = "header"
 
+        self.is_hmac_auth = self.auth_type in {
+            "hmac", "hmac_sha256", "dujiao_hmac", "dujiao-next", "dujiao_next", "signature"
+        }
+        self.is_wmemail_open = self.auth_type in {"wmemail_open", "wmemail", "open_api"}
+        if self.is_hmac_auth and not self.api_secret:
+            raise ValueError("API secret is required for HMAC authentication.")
+
         self.auth_header_name = str(
             self.config_dict.get("auth_header_name")
             or getattr(self.config, "auth_header_name", None)
@@ -138,7 +155,7 @@ class ResellerManager:
         self.auth_query_param = str(
             self.config_dict.get("auth_query_param")
             or getattr(self.config, "auth_query_param", None)
-            or ("key" if is_canboso else "key")
+                or ("api_key" if self.is_wmemail_open else "key")
         )
 
     def __repr__(self) -> str:
@@ -168,7 +185,9 @@ class ResellerManager:
         if not text:
             return ""
         if self.api_key and len(self.api_key) > 3:
-            return text.replace(self.api_key, "***REDACTED***")
+            text = text.replace(self.api_key, "***REDACTED***")
+        if self.api_secret and len(self.api_secret) > 3:
+            text = text.replace(self.api_secret, "***REDACTED***")
         return text
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -217,7 +236,28 @@ class ResellerManager:
                 return ep_val, default_method
 
         is_canboso = "canboso.com" in self.base_url.lower()
-        if is_canboso:
+        if self.is_hmac_auth:
+            prefix = "" if "/api/v1/upstream" in self.base_url else "/api/v1/upstream"
+            hmac_endpoints = {
+                "me": f"{prefix}/ping",
+                "balance": f"{prefix}/ping",
+                "products": f"{prefix}/products",
+                "order": f"{prefix}/orders",
+                "order_detail": f"{prefix}/orders/{{id}}",
+            }
+            return hmac_endpoints.get(feature, default_endpoint), (
+                "POST" if feature in {"order", "me", "balance"} else default_method
+            )
+        elif self.is_wmemail_open:
+            open_endpoints = {
+                "balance": "/api/v1/open/balance",
+                "products": "/api/v1/open/products",
+                "order": "/api/v1/open/orders",
+            }
+            return open_endpoints.get(feature, default_endpoint), (
+                "POST" if feature == "order" else default_method
+            )
+        elif is_canboso:
             if feature == "products":
                 return "/api/v2/telegram-buyer/products", default_method
             elif feature == "balance":
@@ -299,16 +339,50 @@ class ResellerManager:
         url = self._build_url(endpoint)
 
         req_params = dict(params or {})
-        if self.auth_type == "query":
+        if self.auth_type == "query" or (
+            self.is_wmemail_open and feature_name == "balance"
+        ):
             req_params[self.auth_query_param] = self.api_key
 
         headers = {
             "Accept": "application/json",
         }
-        if json_data is not None:
+        body_bytes = b""
+        request_json = json_data
+        request_data = data
+        if self.is_wmemail_open and feature_name == "order" and json_data is not None:
+            request_json = dict(json_data)
+            request_json.setdefault("api_key", self.api_key)
+        if json_data is not None and self.is_hmac_auth:
+            body_bytes = json.dumps(
+                json_data,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            request_json = None
+            request_data = body_bytes
+            headers["Content-Type"] = "application/json"
+        elif json_data is not None:
             headers["Content-Type"] = "application/json"
 
-        if self.auth_type == "bearer":
+        if self.is_hmac_auth:
+            timestamp = str(int(time.time()))
+            request_path = urlsplit(url).path or "/"
+            body_md5 = hashlib.md5(body_bytes).hexdigest()
+            sign_string = f"{method.upper()}\n{request_path}\n{timestamp}\n{body_md5}"
+            signature = hmac.new(
+                self.api_secret.encode("utf-8"),
+                sign_string.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            headers.update({
+                "Dujiao-Next-Api-Key": self.api_key,
+                "Dujiao-Next-Timestamp": timestamp,
+                "Dujiao-Next-Signature": signature,
+            })
+        elif self.is_wmemail_open:
+            headers["Content-Type"] = "application/json"
+        elif self.auth_type == "bearer":
             headers["Authorization"] = f"Bearer {self.api_key}"
         elif self.auth_type in ("header", "custom_header", "api_key"):
             headers[self.auth_header_name] = self.api_key
@@ -320,8 +394,8 @@ class ResellerManager:
                     method,
                     url,
                     headers=headers,
-                    json=json_data,
-                    data=data,
+                    json=request_json,
+                    data=request_data,
                     params=req_params if req_params else None,
             ) as response:
                 text = await response.text()
@@ -403,7 +477,12 @@ class ResellerManager:
         )
         is_canboso = "canboso.com" in self.base_url.lower()
 
-        if is_canboso:
+        if self.is_hmac_auth:
+            prefix = "" if "/api/v1/upstream" in self.base_url else "/api/v1/upstream"
+            default_ep = f"{prefix}/ping"
+        elif self.is_wmemail_open:
+            default_ep = "/api/v1/open/balance"
+        elif is_canboso:
             default_ep = "/api/v2/telegram-buyer/balance"
         elif is_em_store:
             default_ep = "?action=balance"
@@ -447,7 +526,12 @@ class ResellerManager:
         )
         is_canboso = "canboso.com" in self.base_url.lower()
 
-        if is_canboso:
+        if self.is_hmac_auth:
+            prefix = "" if "/api/v1/upstream" in self.base_url else "/api/v1/upstream"
+            default_ep = f"{prefix}/products"
+        elif self.is_wmemail_open:
+            default_ep = "/api/v1/open/products"
+        elif is_canboso:
             default_ep = "/api/v2/telegram-buyer/products"
         elif is_em_store:
             default_ep = "?action=products"
@@ -457,6 +541,10 @@ class ResellerManager:
         endpoint, method = self._get_endpoint_and_method("products", default_ep, "GET")
 
         response = await self._request(method, endpoint, feature_name="products")
+
+        if isinstance(response, dict) and response.get("ok") is False:
+            message = response.get("error_message") or response.get("error_code") or "Provider rejected the request."
+            raise ResellerAPIError(message=str(message), provider_id=self.provider_id)
 
         if is_canboso and isinstance(response, dict):
             if response.get("success") is False:
@@ -498,6 +586,27 @@ class ResellerManager:
             )
 
         normalized_products = []
+        if self.is_hmac_auth or self.is_wmemail_open:
+            expanded_items = []
+            for item in raw_list:
+                skus = item.get("skus") if isinstance(item, dict) else None
+                if not isinstance(skus, list):
+                    expanded_items.append(item)
+                    continue
+                title = item.get("title") or item.get("name") or "Product"
+                if isinstance(title, dict):
+                    title = title.get("en") or title.get("zh-CN") or next(iter(title.values()), "Product")
+                for sku in skus:
+                    if isinstance(sku, dict) and sku.get("is_active", True):
+                        expanded_items.append({
+                            "id": sku.get("id"),
+                            "name": f"{title} {sku.get('sku_code', '')}".strip(),
+                            "price": sku.get("price_amount"),
+                            "stock": sku.get("stock_quantity", sku.get("stock_status")),
+                            "description": item.get("description"),
+                            "category": item.get("category_id"),
+                        })
+            raw_list = expanded_items
         field_map = self._get_mapping("products", {})
         if not isinstance(field_map, dict):
             field_map = {}
@@ -602,7 +711,7 @@ class ResellerManager:
                     else:
                         digits = re.findall(r"\d+", s_val)
                         if digits:
-                            stock = int(digits[0])
+                            stock = max(1, int(digits[0])) if s_val == "low_stock" else int(digits[0])
                             is_available = stock > 0
                         else:
                             stock = 999999
@@ -650,7 +759,25 @@ class ResellerManager:
         )
         is_canboso = "canboso.com" in self.base_url.lower()
 
-        if is_canboso:
+        if self.is_hmac_auth:
+            prefix = "" if "/api/v1/upstream" in self.base_url else "/api/v1/upstream"
+            default_ep = f"{prefix}/orders"
+            payload = {
+                "sku_id": int(service_id) if str(service_id).isdigit() else service_id,
+                "quantity": int(quantity),
+                "downstream_order_no": str(external_order_id or f"ORD-{service_id}-{int(time.time())}"),
+            }
+            from config import UPSTREAM_CALLBACK_URL
+
+            if UPSTREAM_CALLBACK_URL:
+                payload["callback_url"] = UPSTREAM_CALLBACK_URL
+        elif self.is_wmemail_open:
+            default_ep = "/api/v1/open/orders"
+            payload = {
+                "sku_id": int(service_id) if str(service_id).isdigit() else service_id,
+                "quantity": int(quantity),
+            }
+        elif is_canboso:
             default_ep = "/api/v2/telegram-buyer/purchase"
             payload = {
                 "product_id": str(service_id),
@@ -684,6 +811,10 @@ class ResellerManager:
             feature_name="order",
             json_data=payload,
         )
+
+        if isinstance(res, dict) and (res.get("ok") is False or res.get("success") is False):
+            message = res.get("error_message") or res.get("message") or res.get("error_code") or "Provider rejected the order."
+            raise ResellerAPIError(message=str(message), provider_id=self.provider_id)
 
         order_mapping = self._get_mapping("order", {})
         if not isinstance(order_mapping, dict):

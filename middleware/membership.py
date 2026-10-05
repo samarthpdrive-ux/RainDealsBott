@@ -17,6 +17,7 @@ from config import (
 )
 from database import SessionLocal
 from models.user import User
+from services.maintenance_mode import is_maintenance_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,13 @@ CHANNEL_USERNAME = _extract_username(CHANNEL_LINK)
 GROUP_USERNAME = _extract_username(GROUP_LINK)
 
 
-async def check_user_membership(bot, user_id: int, *, force_refresh: bool = False) -> bool:
+async def check_user_membership(
+    bot,
+    user_id: int,
+    *,
+    force_refresh: bool = False,
+    fast: bool = False,
+) -> bool:
     """Return True only when the user belongs to every configured public chat.
 
     A failed result is never cached: a user may have just joined and Telegram
@@ -55,12 +62,14 @@ async def check_user_membership(bot, user_id: int, *, force_refresh: bool = Fals
         return True
 
     async def check_chat(chat_username: str) -> bool:
-        for attempt in range(MEMBERSHIP_VERIFY_ATTEMPTS):
+        attempts = 1 if fast else MEMBERSHIP_VERIFY_ATTEMPTS
+        timeout = 3 if fast else 5
+        for attempt in range(attempts):
             try:
                 # Check chats concurrently. A recently joined user is checked
                 # again briefly because Telegram membership updates can lag.
                 member = await asyncio.wait_for(
-                    bot.get_chat_member(chat_id=chat_username, user_id=user_id), timeout=5
+                    bot.get_chat_member(chat_id=chat_username, user_id=user_id), timeout=timeout
                 )
                 if member.status not in ("left", "kicked"):
                     return True
@@ -69,7 +78,7 @@ async def check_user_membership(bot, user_id: int, *, force_refresh: bool = Fals
                 logger.exception("Membership check failed for %s", chat_username)
                 return True
 
-            if attempt < MEMBERSHIP_VERIFY_ATTEMPTS - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(MEMBERSHIP_RETRY_DELAY_SECONDS)
 
         return False
@@ -153,6 +162,8 @@ RESTRICTED_TEXT = (
     "You can still view your existing orders, support tickets, and deposits."
 )
 
+MAINTENANCE_TEXT = "🛠 <b>Rain Store is currently under maintenance.</b>\n\nPlease check back soon."
+
 
 def _is_banned_read_only_callback(callback_data: str | None) -> bool:
     return bool(callback_data) and callback_data.startswith(BANNED_READ_ONLY_CALLBACKS)
@@ -176,6 +187,23 @@ class BannedUserMiddleware(BaseMiddleware):
         # middleware receives the Message/CallbackQuery itself.
         actual_event = event.event if isinstance(event, Update) else event
         from_user = getattr(actual_event, "from_user", None)
+        if from_user and from_user.id not in ADMIN_IDS and await asyncio.to_thread(is_maintenance_enabled):
+            if isinstance(actual_event, CallbackQuery):
+                if actual_event.message:
+                    try:
+                        await actual_event.message.edit_text(MAINTENANCE_TEXT, parse_mode="HTML")
+                    except Exception:
+                        await actual_event.answer(MAINTENANCE_TEXT, show_alert=True)
+                else:
+                    await actual_event.answer(MAINTENANCE_TEXT, show_alert=True)
+            elif isinstance(actual_event, Message):
+                try:
+                    await actual_event.delete()
+                except Exception:
+                    pass
+                await actual_event.answer(MAINTENANCE_TEXT, parse_mode="HTML")
+            return None
+
         # SQLAlchemy/PyMySQL is synchronous. Never run it directly on the
         # asyncio event loop, otherwise one slow TiDB request freezes every
         # command and callback for all users.

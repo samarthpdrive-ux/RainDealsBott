@@ -40,6 +40,7 @@ STATUS_LABELS = {
     "refunded": "💸 Refunded",
     "deleted": "🗑 Deleted",
 }
+ADMIN_ORDERS_PER_PAGE = 10
 
 
 def is_admin(user_id: int) -> bool:
@@ -51,23 +52,32 @@ def is_admin(user_id: int) -> bool:
 # ==========================================================
 
 @router.callback_query(F.data == "admin_orders")
+@router.callback_query(F.data.startswith("admin_orders_page_"))
 async def admin_orders(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
+
+    try:
+        page = int(callback.data.rsplit("_", 1)[-1]) if callback.data != "admin_orders" else 0
+        page = max(0, page)
+    except ValueError:
+        page = 0
 
     db = SessionLocal()
     try:
         # Soft-deleted orders never show up in the admin list again —
         # see delete_order() below, which sets status="deleted"
         # instead of removing the row.
-        orders = (
+        query = (
             db.query(Order)
             .filter(Order.status != "deleted")
             .order_by(Order.id.desc())
-            .limit(50)
-            .all()
         )
+        total = query.count()
+        total_pages = max(1, (total + ADMIN_ORDERS_PER_PAGE - 1) // ADMIN_ORDERS_PER_PAGE)
+        page = min(page, total_pages - 1)
+        orders = query.offset(page * ADMIN_ORDERS_PER_PAGE).limit(ADMIN_ORDERS_PER_PAGE).all()
 
         if not orders:
             await callback.message.edit_text(
@@ -95,14 +105,21 @@ async def admin_orders(callback: CallbackQuery):
             keyboard.append([
                 InlineKeyboardButton(
                     text=f"#{order.id} {icon} {order.product_name}",
-                    callback_data=f"order_{order.id}"
+                    callback_data=f"order_{order.id}_{page}"
                 )
             ])
 
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="⬅ Previous", callback_data=f"admin_orders_page_{page - 1}"))
+        if page < total_pages - 1:
+            navigation.append(InlineKeyboardButton(text="Next ➡", callback_data=f"admin_orders_page_{page + 1}"))
+        if navigation:
+            keyboard.append(navigation)
         keyboard.append([InlineKeyboardButton(text="⬅ Back", callback_data="admin_panel")])
 
         await callback.message.edit_text(
-            "📦 Latest Orders",
+            f"📦 Orders ({page + 1}/{total_pages}) — {total} total",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
         )
         await callback.answer()
@@ -117,7 +134,9 @@ async def admin_orders(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("order_"))
 async def order_info(callback: CallbackQuery):
-    order_id = int(callback.data.split("_")[1])
+    parts = callback.data.split("_")
+    order_id = int(parts[1])
+    list_page = int(parts[2]) if len(parts) > 2 else 0
 
     db = SessionLocal()
     try:
@@ -127,6 +146,9 @@ async def order_info(callback: CallbackQuery):
             await callback.answer("Order not found.")
             return
 
+        user = db.query(User).filter(User.telegram_id == order.telegram_id).first()
+        username = f"@{user.username}" if user and user.username else "Not set"
+
         delivered = order.delivered_account or "Not delivered yet"
         status_label = STATUS_LABELS.get(order.status, order.status)
 
@@ -135,6 +157,9 @@ async def order_info(callback: CallbackQuery):
 
 👤 User ID:
 <code>{order.telegram_id}</code>
+
+🔎 Username:
+{username}
 
 📦 Product:
 {order.product_name} x{order.quantity or 1}
@@ -176,7 +201,10 @@ Refunded:
                 InlineKeyboardButton(text="🗑 Delete", callback_data=f"delete_order_{order.id}")
             ])
 
-        keyboard.append([InlineKeyboardButton(text="⬅ Back", callback_data="admin_orders")])
+        keyboard.append([InlineKeyboardButton(
+            text="⬅ Back",
+            callback_data="admin_orders" if list_page == 0 else f"admin_orders_page_{list_page}",
+        )])
 
         await callback.message.edit_text(
             text,

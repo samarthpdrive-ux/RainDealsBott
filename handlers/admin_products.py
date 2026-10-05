@@ -43,7 +43,7 @@ except ImportError:
     get_reseller = None
 
 # Notification function import
-from handlers.products import notify_new_product
+from handlers.products import notify_new_product, invalidate_products_cache
 
 logger = logging.getLogger(__name__)
 
@@ -220,15 +220,24 @@ def _get_all_active_providers(db) -> list[dict]:
             for p in db_providers:
                 pid = str(p.id)
                 if pid not in seen_ids:
-                    providers.append({
+                    try:
+                        provider_config = json.loads(getattr(p, "configuration", None) or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        provider_config = {}
+
+                    if not isinstance(provider_config, dict):
+                        provider_config = {}
+
+                    provider_config.update({
                         "id": pid,
                         "name": getattr(p, "name", "Provider"),
                         "base_url": (getattr(p, "base_url", "") or "").replace("/docs", "").rstrip("/"),
                         "api_key": getattr(p, "api_key", ""),
-                        "type": getattr(p, "type", "reseller"),
+                        "api_secret": getattr(p, "api_secret", ""),
+                        "type": getattr(p, "api_type", "reseller"),
                         "auth_type": getattr(p, "auth_type", "query"),
-                        "auth_query_param": getattr(p, "auth_query_param", "key"),
                     })
+                    providers.append(provider_config)
                     seen_ids.add(pid)
         except Exception:
             pass
@@ -263,6 +272,7 @@ def _get_all_active_providers(db) -> list[dict]:
                     if key_str not in seen_ids:
                         b_url = getattr(res, "base_url", None) or (res.get("base_url") if isinstance(res, dict) else "")
                         a_key = getattr(res, "api_key", None) or (res.get("api_key") if isinstance(res, dict) else "")
+                        a_secret = getattr(res, "api_secret", None) or (res.get("api_secret") if isinstance(res, dict) else "")
                         r_name = getattr(res, "name", None) or (res.get("name") if isinstance(res, dict) else key_str)
                         if b_url and a_key:
                             providers.append({
@@ -270,6 +280,7 @@ def _get_all_active_providers(db) -> list[dict]:
                                 "name": r_name,
                                 "base_url": (b_url or "").replace("/docs", "").rstrip("/"),
                                 "api_key": a_key,
+                                "api_secret": a_secret,
                                 "type": "reseller",
                                 "auth_type": getattr(res, "auth_type", "query") if not isinstance(res, dict) else res.get("auth_type", "query"),
                                 "auth_query_param": getattr(res, "auth_query_param", "key") if not isinstance(res, dict) else res.get("auth_query_param", "key"),
@@ -281,6 +292,7 @@ def _get_all_active_providers(db) -> list[dict]:
                     if rid not in seen_ids:
                         b_url = getattr(res, "base_url", None) or (res.get("base_url") if isinstance(res, dict) else "")
                         a_key = getattr(res, "api_key", None) or (res.get("api_key") if isinstance(res, dict) else "")
+                        a_secret = getattr(res, "api_secret", None) or (res.get("api_secret") if isinstance(res, dict) else "")
                         r_name = getattr(res, "name", None) or (res.get("name") if isinstance(res, dict) else rid)
                         if b_url and a_key:
                             providers.append({
@@ -288,6 +300,7 @@ def _get_all_active_providers(db) -> list[dict]:
                                 "name": r_name,
                                 "base_url": (b_url or "").replace("/docs", "").rstrip("/"),
                                 "api_key": a_key,
+                                "api_secret": a_secret,
                                 "type": "reseller",
                                 "auth_type": getattr(res, "auth_type", "query") if not isinstance(res, dict) else res.get("auth_type", "query"),
                                 "auth_query_param": getattr(res, "auth_query_param", "key") if not isinstance(res, dict) else res.get("auth_query_param", "key"),
@@ -735,6 +748,9 @@ async def _fetch_and_show_reseller_products(callback: CallbackQuery, state: FSMC
                     else:
                         stock_val = 999999
 
+                if stock_val <= 0 or prod.get("is_available") is False:
+                    continue
+
                 products_cache[service_id] = prod
 
                 if stock_val >= 999999:
@@ -757,9 +773,9 @@ async def _fetch_and_show_reseller_products(callback: CallbackQuery, state: FSMC
 
         if not products_cache:
             try:
-                await callback.message.edit_text("No products available.", parse_mode="HTML")
+                await callback.message.edit_text("No in-stock products available from this provider.", parse_mode="HTML")
             except Exception:
-                await callback.message.answer("No products available.", parse_mode="HTML")
+                await callback.message.answer("No in-stock products available from this provider.", parse_mode="HTML")
             return
 
         await state.update_data(reseller_products_cache=products_cache)
@@ -803,7 +819,7 @@ async def _fetch_and_show_reseller_products(callback: CallbackQuery, state: FSMC
 
 @router.callback_query(F.data.startswith("reseller_prod:"))
 async def reseller_product_selected(callback: CallbackQuery, state: FSMContext):
-    """Handle selection of a specific reseller product and prompt for selling price."""
+    """Check provider balance and ask how many units to import."""
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("❌ Admin only.", show_alert=True)
         return
@@ -846,6 +862,35 @@ async def reseller_product_selected(callback: CallbackQuery, state: FSMContext):
 
     reseller_name = data.get("reseller_name", "Reseller")
 
+    provider = await asyncio.to_thread(_get_reseller_credentials, str(data.get("reseller_id") or ""))
+    try:
+        manager = ResellerManager(
+            api_key=provider.get("api_key"),
+            base_url=provider.get("base_url"),
+            provider_config=provider,
+        )
+        async with asyncio.timeout(15):
+            provider_balance = await manager.get_balance()
+    except Exception as exc:
+        logger.warning("Could not check provider wallet for import: %s", exc)
+        await callback.answer("Could not verify provider wallet balance.", show_alert=True)
+        return
+
+    if reseller_cost <= 0:
+        await callback.answer("Provider cost is invalid; cannot calculate affordable quantity.", show_alert=True)
+        return
+
+    affordable_quantity = int(provider_balance / reseller_cost)
+    max_import_quantity = min(reseller_stock, affordable_quantity) if reseller_stock < 999999 else affordable_quantity
+    if max_import_quantity <= 0:
+        await callback.message.answer(
+            f"❌ Provider wallet balance is <b>${provider_balance:.2f}</b>; "
+            f"this product costs <b>${reseller_cost:.2f}</b> per unit, so no units can be imported.",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
     logger.info(
         "Selected Reseller Product | Provider: %s | Service ID: %s | Name: %s | Cost: %s | Stock: %s",
         reseller_name,
@@ -862,6 +907,8 @@ async def reseller_product_selected(callback: CallbackQuery, state: FSMContext):
         reseller_product_name=reseller_product_name,
         reseller_cost=float(reseller_cost),
         reseller_stock=reseller_stock,
+        provider_balance=float(provider_balance),
+        max_import_quantity=max_import_quantity,
         reseller_name=reseller_name,
         icon=selected.get("emoji", "📦") or "📦",
         category=selected.get("productType", "reseller") or "reseller",
@@ -869,7 +916,7 @@ async def reseller_product_selected(callback: CallbackQuery, state: FSMContext):
         delivery_type="automatic",
     )
 
-    await state.set_state(AddProduct.price)
+    await state.set_state(AddProduct.reseller_quantity)
 
     stock_display = f"{reseller_stock}" if reseller_stock < 999999 else "🟢 In Stock"
 
@@ -877,17 +924,42 @@ async def reseller_product_selected(callback: CallbackQuery, state: FSMContext):
         f"🔗 <b>Selected Reseller Product:</b>\n"
         f"<b>{_esc(reseller_product_name)}</b>\n\n"
         f"💰 <b>Provider Cost:</b> ${reseller_cost:.2f}\n"
-        f"📦 <b>Live Stock:</b> {stock_display}\n"
+        f"📦 <b>Provider Stock:</b> {stock_display}\n"
+        f"💳 <b>Provider Wallet:</b> ${provider_balance:.2f}\n"
+        f"✅ <b>Maximum affordable quantity:</b> {max_import_quantity}\n\n"
         f"🏪 <b>Provider:</b> {_esc(reseller_name)}\n"
         f"🆔 <b>Service ID:</b> <code>{_esc(service_id)}</code>\n\n"
         f"{_divider('─')}\n\n"
+        f"📦 <b>Enter the exact quantity to add (1–{max_import_quantity}):</b>",
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+
+
+@router.message(AddProduct.reseller_quantity)
+async def reseller_import_quantity(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS or not message.text:
+        return
+    try:
+        quantity = int(message.text.strip())
+    except ValueError:
+        await message.answer("Send a whole-number quantity.")
+        return
+    data = await state.get_data()
+    maximum = int(data.get("max_import_quantity", 0))
+    if quantity < 1 or quantity > maximum:
+        await message.answer(f"Quantity must be between 1 and {maximum}.")
+        return
+    await state.update_data(reseller_import_quantity=quantity)
+    await state.set_state(AddProduct.price)
+    await message.answer(
+        f"✅ Import quantity set to <b>{quantity}</b>.\n"
         f"💰 <b>Enter your selling price (USD):</b>\n\n"
         f"<i>This is the price your customers will pay in your store.</i>\n"
         f"<i>Example: 0.99 or 1.50</i>",
         parse_mode="HTML"
     )
-
-    await callback.answer()
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -1017,7 +1089,7 @@ async def product_price(message: Message, state: FSMContext):
         reseller_name = data.get("reseller_name", "Reseller")
         reseller_service_id = data.get("reseller_service_id")
         reseller_cost = data.get("reseller_cost")
-        reseller_stock = data.get("reseller_stock", 999999)
+        reseller_stock = data.get("reseller_import_quantity", 0)
 
         db = SessionLocal()
         try:
@@ -1083,6 +1155,7 @@ async def product_price(message: Message, state: FSMContext):
                 action_str = "Created"
 
             db.commit()
+            invalidate_products_cache()
             db.refresh(product)
             pid = product.id
 
@@ -1439,6 +1512,7 @@ async def save_product(message: Message, state: FSMContext):
 
         db.add(product)
         db.commit()
+        invalidate_products_cache()
         db.refresh(product)
         pid = product.id
     finally:

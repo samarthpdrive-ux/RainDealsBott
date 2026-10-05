@@ -13,6 +13,9 @@ from bot_app import bot, dp
 from services.deposit_checker import deposit_checker_loop
 from services.order_notifications import order_notification_loop
 from services.product_api_access import ensure_product_api_access_schema
+from services.provider_schema import ensure_provider_schema
+from services.maintenance_mode import ensure_maintenance_schema
+from services.order_rating_schema import ensure_order_rating_schema
 
 
 # ============================================================
@@ -98,6 +101,9 @@ async def main():
     runner = await start_http_server()
 
     await asyncio.to_thread(ensure_product_api_access_schema)
+    await asyncio.to_thread(ensure_provider_schema)
+    await asyncio.to_thread(ensure_maintenance_schema)
+    await asyncio.to_thread(ensure_order_rating_schema)
 
     # --------------------------------------------------------
     # DEPOSIT CHECKER

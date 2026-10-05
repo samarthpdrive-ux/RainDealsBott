@@ -21,6 +21,7 @@ class AddProduct(StatesGroup):
     # Reseller flow
     reseller_select = State()
     reseller_product = State()
+    reseller_quantity = State()
     reseller_price = State()
 
 
@@ -29,6 +30,7 @@ class EditProduct(StatesGroup):
     select_product = State()
     edit_field = State()
     new_value = State()
+    name = State()
 
 
 class AddStock(StatesGroup):

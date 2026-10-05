@@ -20,8 +20,8 @@ from aiogram.exceptions import TelegramBadRequest
 from config import ADMIN_IDS
 from database import SessionLocal
 from models.product import Product
-from states.product_states import AddAccounts, EditAccounts, EditBulkPricing
-from handlers.products import _real_stock, _send_stock_channel_message
+from states.product_states import AddAccounts, EditAccounts, EditBulkPricing, EditProduct
+from handlers.products import _real_stock, _send_stock_channel_message, invalidate_products_cache
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -111,7 +111,8 @@ async def _notify_stock_change(bot, pid: int):
         return
 
     text = _build_stockctl_sync_text(product)
-    await _send_stock_channel_message(bot, text)
+    stock = _real_stock(product)
+    await _send_stock_channel_message(bot, text, product_id=product.id, can_buy=stock > 0)
 
 
 def _load_product(pid: int):
@@ -245,6 +246,7 @@ def _format_bulk_pricing_plain(bulk_pricing: str | None) -> str:
 # ==================================================
 
 async def _refresh_manage_panel(callback: CallbackQuery, pid: int):
+    invalidate_products_cache()
     product = await asyncio.to_thread(_load_product, pid)
 
     if not product:
@@ -333,6 +335,18 @@ ${float(product.price or 0):.2f}
 
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✏️ Edit Product Name",
+                    callback_data=f"edit_name_{product.id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔗 Create Product Link",
+                    callback_data=f"create_product_link_{product.id}"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="➕ Add Accounts",
@@ -447,6 +461,38 @@ async def manage_product(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("create_product_link_"))
+async def create_product_link(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
+    try:
+        product_id = int(callback.data.removeprefix("create_product_link_"))
+    except (TypeError, ValueError):
+        await callback.answer("Invalid product.", show_alert=True)
+        return
+
+    product = await asyncio.to_thread(_load_product, product_id)
+    if not product:
+        await callback.answer("Product not found.", show_alert=True)
+        return
+
+    bot_info = await callback.bot.get_me()
+    product_url = f"https://t.me/{bot_info.username}?start=product_{product_id}"
+    await callback.message.answer(
+        f"🔗 <b>Direct link for {safe(product.name)}</b>\n\n"
+        f"<code>{product_url}</code>\n\n"
+        "Share this link. When opened, it will take users directly to this product.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔎 Open Product", url=product_url)
+        ]]),
+        disable_web_page_preview=True,
+    )
+    await callback.answer("Product link created.")
+
+
 # ==================================================
 # ADD ACCOUNTS
 # ==================================================
@@ -501,6 +547,7 @@ async def save_accounts(message: Message, state: FSMContext):
             [line for line in product.file_content.splitlines() if line.strip()]
         )
         db.commit()
+        invalidate_products_cache()
         db.refresh(product)
     finally:
         db.close()
@@ -631,6 +678,7 @@ async def replace_accounts_save(message: Message, state: FSMContext):
             [line for line in product.file_content.splitlines() if line.strip()]
         )
         db.commit()
+        invalidate_products_cache()
         db.refresh(product)
     finally:
         db.close()
@@ -675,6 +723,7 @@ async def clear_accounts(callback: CallbackQuery):
         product.file_content = None
         product.stock = 0
         db.commit()
+        invalidate_products_cache()
         db.refresh(product)
     finally:
         db.close()
@@ -732,6 +781,7 @@ async def toggle_product_api(callback: CallbackQuery):
             return
         product.api_enabled = not bool(getattr(product, "api_enabled", True))
         db.commit()
+        invalidate_products_cache()
         api_enabled = product.api_enabled
     finally:
         db.close()
@@ -766,6 +816,7 @@ async def cycle_delivery_type(callback: CallbackQuery):
             next_index = 0
         product.delivery_type = DELIVERY_TYPES[next_index]
         db.commit()
+        invalidate_products_cache()
 
         new_label = DELIVERY_LABELS[product.delivery_type]
     finally:
@@ -792,6 +843,7 @@ async def toggle_preorder(callback: CallbackQuery):
 
         product.preorder = not product.preorder
         db.commit()
+        invalidate_products_cache()
         new_state = product.preorder
     finally:
         db.close()
@@ -924,6 +976,7 @@ async def save_bulk_pricing(message: Message, state: FSMContext):
         if product:
             product.bulk_pricing = bulk_json
             db.commit()
+            invalidate_products_cache()
     finally:
         db.close()
 
@@ -931,6 +984,100 @@ async def save_bulk_pricing(message: Message, state: FSMContext):
 # ==================================================
 # QUICK PROMPTS & COMMAND EDITORS
 # ==================================================
+
+@router.callback_query(F.data.startswith("edit_name_"))
+async def edit_product_name_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    try:
+        pid = int(callback.data.removeprefix("edit_name_"))
+    except (TypeError, ValueError):
+        await callback.answer("Invalid product.", show_alert=True)
+        return
+
+    product = await asyncio.to_thread(_load_product, pid)
+    if not product:
+        await callback.answer("Product not found.", show_alert=True)
+        return
+
+    await state.update_data(edit_product_name_id=pid)
+    await state.set_state(EditProduct.name)
+    await callback.message.answer(
+        f"Current name: <b>{safe(product.name)}</b>\n\n"
+        "Send the new product name (1–255 characters).",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Cancel", callback_data="cancel_edit_name")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_edit_name")
+async def cancel_product_name_edit(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    data = await state.get_data()
+    pid = data.get("edit_product_name_id")
+    await state.clear()
+    if pid:
+        await callback.message.answer(
+            "Name edit cancelled.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="📋 Back to Product", callback_data=f"manage_{pid}")]]
+            ),
+        )
+    else:
+        await callback.message.answer("Name edit cancelled.")
+    await callback.answer()
+
+
+@router.message(EditProduct.name)
+async def save_product_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("❌ Product name can't be empty. Send a name or tap Cancel.")
+        return
+    if len(name) > 255:
+        await message.answer("❌ Product name must be 255 characters or fewer.")
+        return
+
+    data = await state.get_data()
+    pid = data.get("edit_product_name_id")
+    if not pid:
+        await state.clear()
+        await message.answer("❌ Product edit expired. Open the product manager and try again.")
+        return
+
+    db = SessionLocal()
+    try:
+        product = db.query(Product).filter(Product.id == int(pid)).first()
+        if not product:
+            await message.answer("❌ Product not found.")
+            return
+        product.name = name
+        db.commit()
+        invalidate_products_cache()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to update product name for product %s", pid)
+        await message.answer("❌ Could not update the product name. Please try again.")
+        return
+    finally:
+        db.close()
+        await state.clear()
+
+    product = await asyncio.to_thread(_load_product, int(pid))
+    if product:
+        panel_text, markup = _build_product_panel(product)
+        await message.answer(panel_text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message.answer("✅ Product name updated.")
 
 @router.callback_query(F.data.startswith("edit_price_"))
 async def edit_price(callback: CallbackQuery):
@@ -1010,6 +1157,7 @@ async def set_price(message: Message):
             return
         product.price = Decimal(str(price))
         db.commit()
+        invalidate_products_cache()
         await message.answer(f"✅ Price updated to <b>${price:.2f}</b>.", parse_mode="HTML")
     finally:
         db.close()
@@ -1053,6 +1201,7 @@ async def set_stock(message: Message):
             )
         product.stock = stock
         db.commit()
+        invalidate_products_cache()
         db.refresh(product)
     finally:
         db.close()
@@ -1095,6 +1244,7 @@ async def set_threshold(message: Message):
             return
         product.low_stock_threshold = threshold
         db.commit()
+        invalidate_products_cache()
         await message.answer(f"✅ Low stock alert threshold set to <b>{threshold}</b>.", parse_mode="HTML")
     finally:
         db.close()
@@ -1122,6 +1272,7 @@ async def set_desc(message: Message):
             return
         product.description = desc
         db.commit()
+        invalidate_products_cache()
         await message.answer("✅ Description updated.")
     finally:
         db.close()
@@ -1143,6 +1294,7 @@ async def delete_product(callback: CallbackQuery):
         if product:
             db.delete(product)
             db.commit()
+            invalidate_products_cache()
     finally:
         db.close()
 

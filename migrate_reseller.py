@@ -19,6 +19,12 @@ from database import engine
 
 COLUMN_ADDITIONS = [
 
+    (
+        "providers",
+        "api_secret",
+        "TEXT NULL",
+    ),
+
     # ========================================================
     # PRODUCTS
     # ========================================================
