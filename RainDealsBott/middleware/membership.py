@@ -80,17 +80,18 @@ async def check_user_membership(
                 member = await asyncio.wait_for(
                     bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=timeout
                 )
-                if member.status not in ("left", "kicked"):
+                if member.status not in ("left", "kicked") and not (
+                    member.status == "restricted" and not getattr(member, "is_member", False)
+                ):
                     return True, None
                 logger.info("Membership missing: user=%s chat=%s status=%s", user_id, name, member.status)
                 return False, name
             except Exception as error:
-                # A temporary Telegram/API configuration failure must not lock users out.
                 if "member list is inaccessible" in str(error).lower():
                     logger.error("Bot cannot inspect membership for %s (%s); add it as an administrator", name, chat_id)
                     return False, f"{name} (bot needs admin access)"
-                logger.exception("Membership check failed for %s (%s)", name, chat_id)
-                return True, None
+                logger.exception("Membership verification failed for %s (%s)", name, chat_id)
+                return False, f"{name} (verification failed)"
 
             if attempt < attempts - 1:
                 await asyncio.sleep(MEMBERSHIP_RETRY_DELAY_SECONDS)
@@ -181,6 +182,10 @@ RESTRICTED_TEXT = (
 )
 
 MAINTENANCE_TEXT = "🛠 <b>Rain Store is currently under maintenance.</b>\n\nPlease check back soon."
+MEMBERSHIP_REQUIRED_TEXT = (
+    "🔒 <b>Join all required channels to use the bot.</b>\n\n"
+    "After joining, tap <b>Try Again</b> to verify your membership."
+)
 
 
 def _is_banned_read_only_callback(callback_data: str | None) -> bool:
@@ -221,6 +226,35 @@ class BannedUserMiddleware(BaseMiddleware):
                     pass
                 await actual_event.answer(MAINTENANCE_TEXT, parse_mode="HTML")
             return None
+
+        if from_user and from_user.id not in ADMIN_IDS:
+            is_membership_retry = (
+                isinstance(actual_event, CallbackQuery)
+                and actual_event.data == "check_membership_retry"
+            )
+            if not is_membership_retry:
+                membership_result = await check_user_membership(
+                    data.get("bot"), from_user.id, fast=True
+                )
+                if not membership_result:
+                    if isinstance(actual_event, CallbackQuery):
+                        try:
+                            if actual_event.message:
+                                await actual_event.message.edit_text(
+                                    MEMBERSHIP_REQUIRED_TEXT,
+                                    parse_mode="HTML",
+                                    reply_markup=get_join_keyboard(),
+                                )
+                        except Exception:
+                            pass
+                        await actual_event.answer("Join all required channels first.", show_alert=True)
+                    elif isinstance(actual_event, Message):
+                        await actual_event.answer(
+                            MEMBERSHIP_REQUIRED_TEXT,
+                            parse_mode="HTML",
+                            reply_markup=get_join_keyboard(),
+                        )
+                    return None
 
         # SQLAlchemy/PyMySQL is synchronous. Never run it directly on the
         # asyncio event loop, otherwise one slow TiDB request freezes every
