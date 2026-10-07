@@ -4,6 +4,7 @@ import re
 import uuid
 import logging
 import asyncio
+import time
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -653,32 +654,40 @@ def _apply_promo_to_user(telegram_id: int, promo_code: str, promo_amount: Decima
 @router.callback_query(F.data == "deposit_start")
 async def deposit_menu(callback: CallbackQuery):
     """Display the deposit method selection menu."""
-    await callback.answer()
+    started = time.perf_counter()
+    try:
+        await callback.answer()
 
-    text = (
-        f"💰 <b>DEPOSIT FUNDS</b>\n\n"
-        f"<b>Select your preferred payment method:</b>\n\n"
-        f"{_divider('─', 28)}\n\n"
-        f"🟡 <b>USDT (BEP20)</b>\n"
-        f"   └ Fast & low fees · Binance Smart Chain\n\n"
-        f"🟣 <b>USDT (Polygon)</b>\n"
-        f"   └ Cheap transactions · Polygon Network\n\n"
-        f"🔴 <b>Binance Pay</b>\n"
-        f"   └ Pay with any crypto · Instant\n\n"
-        f"🟢 <b>UPI (₹ INR)</b>\n"
-        f"   └ Indian Rupee · Bank transfer\n\n"
-        f"🏷️ <b>Redeem Promocode</b>\n"
-        f"   └ Use a promo code to get bonus credits\n\n"
-        f"{_divider('─', 28)}\n\n"
-        f"💡 <i>All deposits are verified automatically</i>"
-    )
+        text = (
+            f"💰 <b>DEPOSIT FUNDS</b>\n\n"
+            f"<b>Select your preferred payment method:</b>\n\n"
+            f"{_divider('─', 28)}\n\n"
+            f"🟡 <b>USDT (BEP20)</b>\n"
+            f"   └ Fast & low fees · Binance Smart Chain\n\n"
+            f"🟣 <b>USDT (Polygon)</b>\n"
+            f"   └ Cheap transactions · Polygon Network\n\n"
+            f"🔴 <b>Binance Pay</b>\n"
+            f"   └ Pay with any crypto · Instant\n\n"
+            f"🟢 <b>UPI (₹ INR)</b>\n"
+            f"   └ Indian Rupee · Bank transfer\n\n"
+            f"🏷️ <b>Redeem Promocode</b>\n"
+            f"   └ Use a promo code to get bonus credits\n\n"
+            f"{_divider('─', 28)}\n\n"
+            f"💡 <i>All deposits are verified automatically</i>"
+        )
 
-    await show(
-        callback,
-        text,
-        parse_mode="HTML",
-        reply_markup=get_deposit_menu()
-    )
+        await show(
+            callback,
+            text,
+            parse_mode="HTML",
+            reply_markup=get_deposit_menu()
+        )
+    finally:
+        logger.info(
+            "button_timing button=deposit user_id=%s total_ms=%.1f",
+            callback.from_user.id,
+            (time.perf_counter() - started) * 1000,
+        )
 
 
 # ╔══════════════════════════════════════════════════════════════╗

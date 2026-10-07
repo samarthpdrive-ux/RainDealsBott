@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 from decimal import Decimal, ROUND_HALF_UP
 
 from aiogram import Router, F
@@ -492,6 +493,8 @@ def _do_deliver(order_id: int, delivered_text: str) -> dict:
             return {"error": "This order was already refunded, not delivering it."}
         if order.status == "deleted":
             return {"error": "This order was deleted."}
+        if order.status == "completed":
+            return {"error": "This order has already been delivered."}
 
         was_preorder = order.is_preorder
 
@@ -597,15 +600,13 @@ async def deliver_order_finish(message: Message, state: FSMContext):
             "completed": {"emoji": "✅", "label": "Completed", "icon": "🟢", "progress": 100},
         }.get(full_order.status, {"emoji": "✅", "label": "Completed", "icon": "🟢", "progress": 100})
 
-        progress_bar = "[" + "█" * 10 + "] 100%"
-
         order_text = (
-            f"{status_config['icon']} <b>Order #{full_order.id}</b>\n"
-            f"   └ {status_config['emoji']} <b>{status_config['label']}</b>\n"
-            f"   └ Progress: {progress_bar}\n\n"
-            f"📦 <b>Product:</b> {full_order.product_name}\n"
-            f"🔢 <b>Quantity:</b> {full_order.quantity or 1}x\n"
-            f"💰 <b>Amount:</b> ${float(full_order.amount):.2f}\n"
+            "✅ <b>ORDER DELIVERED</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🧾 <b>Order:</b> <code>#{full_order.id}</code>\n"
+            f"📦 <b>Product:</b> {escape(str(full_order.product_name or 'Product'))}\n"
+            f"🔢 <b>Quantity:</b> {full_order.quantity or 1}\n"
+            f"💰 <b>Total:</b> ${float(full_order.amount):.2f}\n"
         )
 
         if full_order.delivery_type:
@@ -615,18 +616,12 @@ async def deliver_order_finish(message: Message, state: FSMContext):
                 "hybrid": "🔀 Hybrid",
             }
             dt_label = delivery_labels.get(full_order.delivery_type, full_order.delivery_type)
-            order_text += f"🏷 <b>Type:</b> {dt_label}\n"
-            order_text += f"⏱ <b>ETA:</b> {'Instant' if full_order.delivery_type == 'automatic' else 'Delivered'}\n"
+            order_text += f"🚚 <b>Delivery:</b> {dt_label}\n"
 
         order_text += (
-            f"\n🔑 <b>Delivered Details:</b>\n"
-            f"   <code>{result['delivered_text'][:200]}</code>\n"
-            f"\n📅 <b>Delivered:</b> {full_order.created_at.strftime('%d %b %Y, %I:%M %p') if full_order.created_at else 'N/A'}\n"
-            f"\n{'═' * 35}\n\n"
-            f"✅ <b>Order Completed!</b>\n\n"
-            f"🎉 <b>Enjoy your purchase!</b>\n"
-            f"💡 <i>Tip: Rate this order to help us improve.</i>\n\n"
-            f"<i>Thank you for your patience! 🙏</i>"
+            "\n🔑 <b>Your delivery details:</b>\n"
+            f"<pre>{escape(str(result['delivered_text']))}</pre>\n\n"
+            "🎉 Enjoy your purchase!"
         )
 
         # Build keyboard with buttons for ordinary main-bot customers only.
@@ -669,9 +664,11 @@ async def deliver_order_finish(message: Message, state: FSMContext):
                 destination_id,
                 ("📦 <b>Your order has been delivered</b>\n\n" if result["delivery_telegram_id"] else
                  "📤 <b>Admin delivery copy</b>\n\nNo customer Telegram ID was supplied. Forward the details below yourself.\n\n") +
-                f"<b>Product:</b> {full_order.product_name}\n"
-                f"<b>Order:</b> #{full_order.id}\n\n"
-                f"🔑 <b>Delivered details:</b>\n<code>{result['delivered_text']}</code>",
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                f"🧾 <b>Order:</b> <code>#{full_order.id}</code>\n"
+                f"📦 <b>Product:</b> {escape(str(full_order.product_name or 'Product'))}\n"
+                f"🔢 <b>Quantity:</b> {full_order.quantity or 1}\n\n"
+                f"🔑 <b>Your delivery:</b>\n<pre>{escape(str(result['delivered_text']))}</pre>",
                 parse_mode="HTML",
             )
             await message.answer(f"✅ Manual delivery sent through the Delivery Bot to {recipient_label}.")

@@ -2,8 +2,8 @@ import time
 import uuid
 import requests
 
-BASE_URL = "https://raindealsbott.onrender.com"
-API_KEY = "AK_N98UoRlYR0SiI9nkbVotqi2U9uBn_IYjXN7huGGlq30"
+BASE_URL = "https://raindealsbotapi.onrender.com"
+API_KEY = "AK_Xl2R76jtYgZI149TQ9_h6s2cXVGD5Kx5Hd6BtTmQ_nM"
 
 
 def test_create_manual_order(service_id, quantity, customer_telegram_id):

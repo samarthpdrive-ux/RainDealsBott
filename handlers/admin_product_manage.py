@@ -33,6 +33,180 @@ DELIVERY_LABELS = {
     "hybrid": "🔀 Hybrid",
 }
 DEFAULT_LOW_STOCK_THRESHOLD = 3
+_BULK_PAGE_SIZE = 8
+
+
+def _bulk_keyboard(products, selected_ids: set[int], page: int, total_pages: int):
+    rows = []
+    for product in products:
+        selected = product.id in selected_ids
+        status = "🟢" if product.is_active else "🔴"
+        api_status = "API✓" if getattr(product, "api_enabled", True) else "API✗"
+        rows.append([InlineKeyboardButton(
+            text=f"{'☑' if selected else '☐'} #{product.id} {status} {product.name[:22]} · {api_status}",
+            callback_data=f"bulk_select_{product.id}_{page}",
+        )])
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(text="⬅ Prev", callback_data=f"bulk_page_{page - 1}"))
+    navigation.append(InlineKeyboardButton(text=f"{page + 1}/{max(total_pages, 1)}", callback_data="bulk_cancel"))
+    if page + 1 < total_pages:
+        navigation.append(InlineKeyboardButton(text="Next ➡", callback_data=f"bulk_page_{page + 1}"))
+    rows.append(navigation)
+    rows.extend([
+        [InlineKeyboardButton(text="🛍 Disable Shop", callback_data="bulk_confirm_shop_off"),
+         InlineKeyboardButton(text="🛍 Enable Shop", callback_data="bulk_confirm_shop_on")],
+        [InlineKeyboardButton(text="🔌 Disable API", callback_data="bulk_confirm_api_off"),
+         InlineKeyboardButton(text="🔌 Enable API", callback_data="bulk_confirm_api_on")],
+        [InlineKeyboardButton(text="🧹 Clear Selection", callback_data="bulk_clear"),
+         InlineKeyboardButton(text="⬅ Back", callback_data="admin_products")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _show_bulk_manager(callback: CallbackQuery, state: FSMContext, page: int = 0):
+    db = SessionLocal()
+    try:
+        total = db.query(Product).count()
+        total_pages = (total + _BULK_PAGE_SIZE - 1) // _BULK_PAGE_SIZE
+        page = max(0, min(page, max(total_pages - 1, 0)))
+        products = (db.query(Product).order_by(Product.id.asc())
+                    .offset(page * _BULK_PAGE_SIZE).limit(_BULK_PAGE_SIZE).all())
+    finally:
+        db.close()
+    data = await state.get_data()
+    selected_ids = {int(value) for value in data.get("bulk_selected_ids", [])}
+    text = (
+        "🧰 <b>BULK PRODUCT MANAGER</b>\n"
+        "Select products, then choose a shop/API action.\n"
+        "Inventory and provider credentials are not changed.\n\n"
+        f"Page {page + 1}/{max(total_pages, 1)} · {total} products\n"
+        f"Selected: <b>{len(selected_ids)}</b>"
+    )
+    if not products:
+        text += "\n\nNo products found."
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=_bulk_keyboard(products, selected_ids, page, total_pages),
+    )
+
+
+@router.callback_query(F.data == "bulk_products")
+async def bulk_products(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await state.update_data(bulk_selected_ids=[])
+    await _show_bulk_manager(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bulk_cancel")
+async def bulk_products_cancel(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await _show_bulk_manager(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bulk_page_"))
+async def bulk_products_page(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await _show_bulk_manager(callback, state, int(callback.data.rsplit("_", 1)[1]))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bulk_select_"))
+async def bulk_product_select(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    _, _, product_id, page = callback.data.split("_")
+    data = await state.get_data()
+    selected = {int(value) for value in data.get("bulk_selected_ids", [])}
+    product_id = int(product_id)
+    selected.symmetric_difference_update({product_id})
+    await state.update_data(bulk_selected_ids=sorted(selected))
+    await _show_bulk_manager(callback, state, int(page))
+    await callback.answer("Selection updated")
+
+
+@router.callback_query(F.data == "bulk_clear")
+async def bulk_products_clear(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await state.update_data(bulk_selected_ids=[])
+    await _show_bulk_manager(callback, state)
+    await callback.answer("Selection cleared")
+
+
+@router.callback_query(F.data.startswith("bulk_confirm_"))
+async def bulk_products_confirm_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    action = callback.data.removeprefix("bulk_confirm_")
+    data = await state.get_data()
+    selected = data.get("bulk_selected_ids", [])
+    labels = {
+        "shop_off": "hide selected products from the shop",
+        "shop_on": "show selected products in the shop",
+        "api_off": "disable API exposure for selected products",
+        "api_on": "enable API exposure for selected products",
+    }
+    if not selected or action not in labels:
+        await callback.answer("Select products and choose a valid action.", show_alert=True)
+        return
+    await state.update_data(bulk_pending_action=action)
+    await callback.message.edit_text(
+        f"⚠️ <b>Confirm bulk change</b>\n\nThis will {labels[action]} "
+        f"for <b>{len(selected)}</b> product(s). Inventory will not be changed.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Confirm", callback_data="bulk_apply")],
+            [InlineKeyboardButton(text="Cancel", callback_data="bulk_cancel")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bulk_apply")
+async def bulk_products_apply(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    data = await state.get_data()
+    selected = [int(value) for value in data.get("bulk_selected_ids", [])]
+    action = data.get("bulk_pending_action")
+    if not selected or action not in {"shop_off", "shop_on", "api_off", "api_on"}:
+        await callback.answer("Selection or action expired; please select again.", show_alert=True)
+        await _show_bulk_manager(callback, state)
+        return
+    db = SessionLocal()
+    try:
+        products = db.query(Product).filter(Product.id.in_(selected)).all()
+        for product in products:
+            if action.startswith("shop_"):
+                product.is_active = action == "shop_on"
+            else:
+                product.api_enabled = action == "api_on"
+        db.commit()
+        updated = len(products)
+    except Exception:
+        db.rollback()
+        logger.exception("Bulk product visibility update failed")
+        await callback.answer("Could not update products.", show_alert=True)
+        return
+    finally:
+        db.close()
+    invalidate_products_cache()
+    await state.update_data(bulk_selected_ids=[], bulk_pending_action=None)
+    await _show_bulk_manager(callback, state)
+    await callback.answer(f"Updated {updated} product(s)", show_alert=True)
 
 
 def is_admin(user_id: int) -> bool:

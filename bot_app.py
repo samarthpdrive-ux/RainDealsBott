@@ -13,6 +13,7 @@ from aiogram.types import BotCommand, BotCommandScopeDefault
 from config import BOT_TOKEN
 
 from middleware.membership import BannedUserMiddleware
+from middleware.session_timeout import CallbackSessionTimeoutMiddleware
 
 
 # ============================================================
@@ -20,7 +21,7 @@ from middleware.membership import BannedUserMiddleware
 # ============================================================
 
 from handlers.start import router as start_router
-from handlers.products import router as products_router
+from handlers.products import _fetch_active_products, router as products_router
 from handlers.orders import router as orders_router
 from handlers.deposit import router as deposit_router
 from handlers.referral import router as referrals_router
@@ -103,7 +104,16 @@ async def _register_bot_commands(bot: Bot):
         logger.exception("Could not register Telegram bot commands")
 
 
+async def _warm_product_catalog(bot: Bot):
+    try:
+        await _fetch_active_products()
+        logger.info("Product catalog cache warmed")
+    except Exception:
+        logger.exception("Could not warm product catalog cache")
+
+
 dp.startup.register(_register_bot_commands)
+dp.startup.register(_warm_product_catalog)
 
 
 # ============================================================
@@ -113,6 +123,9 @@ dp.startup.register(_register_bot_commands)
 dp.update.outer_middleware(
     BannedUserMiddleware()
 )
+session_timeout_middleware = CallbackSessionTimeoutMiddleware()
+dp.callback_query.outer_middleware(session_timeout_middleware)
+dp.message.outer_middleware(session_timeout_middleware)
 
 
 # ============================================================

@@ -40,6 +40,7 @@ from keyboards.menu import get_admin_main_menu
 from states.broadcast import BroadcastState
 from services.maintenance_mode import is_maintenance_enabled, set_maintenance_enabled
 from handlers.start import _build_start_welcome, _get_bot_username
+from handlers.products import invalidate_catalog_custom_prices_cache
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -2007,6 +2008,7 @@ async def rate_control_save_price(message: Message, state: FSMContext):
             if control:
                 db.delete(control)
                 db.commit()
+                invalidate_catalog_custom_prices_cache()
             await state.clear()
             await message.answer(
                 f"✅ Rate Control price removed for <b>{safe(product_name)}</b>.\n"
@@ -2030,6 +2032,7 @@ async def rate_control_save_price(message: Message, state: FSMContext):
         db.commit()
     finally:
         db.close()
+    invalidate_catalog_custom_prices_cache()
     await state.clear()
     await message.answer(
         f"✅ Rate Control saved\n\nProduct: <b>{safe(product_name)}</b>\nPrice: <b>${price}</b> per unit\n\n"
@@ -2147,6 +2150,7 @@ async def custom_rate_scope_control(callback: CallbackQuery, state: FSMContext):
         db.commit()
     finally:
         db.close()
+    invalidate_catalog_custom_prices_cache()
     await state.clear()
     await _safe_edit_text(
         callback.message,
@@ -2234,6 +2238,7 @@ async def custom_rate_save(message: Message, state: FSMContext):
         db.commit()
     finally:
         db.close()
+    invalidate_catalog_custom_prices_cache()
     await state.clear()
     scope = "all products" if product_id is None else f"product #{product_id}"
     await message.answer(
@@ -2308,6 +2313,7 @@ async def rate_control_assignment_stop(callback: CallbackQuery):
         db.commit()
     finally:
         db.close()
+    invalidate_catalog_custom_prices_cache()
     await custom_rate_list(callback, "🛑 Rate Control stopped. Normal prices are active now.")
 
 
@@ -2332,4 +2338,5 @@ async def custom_rate_stop(callback: CallbackQuery):
         db.commit()
     finally:
         db.close()
+    invalidate_catalog_custom_prices_cache()
     await custom_rate_list(callback, "🛑 Custom rate stopped. Normal price is active now.")
