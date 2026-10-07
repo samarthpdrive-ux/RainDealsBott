@@ -11,12 +11,15 @@ from config import (
     BANNED_USER_CACHE_TTL,
     CHANNEL_LINK,
     GROUP_LINK,
+    ADDITIONAL_CHANNEL_LINK,
+    ADDITIONAL_CHANNEL_ID,
     MEMBERSHIP_CACHE_TTL,
     MEMBERSHIP_RETRY_DELAY_SECONDS,
     MEMBERSHIP_VERIFY_ATTEMPTS,
 )
 from database import SessionLocal
 from models.user import User
+from services.maintenance_mode import is_maintenance_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +39,17 @@ def _extract_username(link: str) -> str | None:
 
 CHANNEL_USERNAME = _extract_username(CHANNEL_LINK)
 GROUP_USERNAME = _extract_username(GROUP_LINK)
+ADDITIONAL_CHANNEL_CHAT_ID = ADDITIONAL_CHANNEL_ID or _extract_username(ADDITIONAL_CHANNEL_LINK)
 
 
-async def check_user_membership(bot, user_id: int, *, force_refresh: bool = False) -> bool:
+async def check_user_membership(
+    bot,
+    user_id: int,
+    *,
+    force_refresh: bool = False,
+    fast: bool = False,
+    with_details: bool = False,
+) -> bool | tuple[bool, list[str]]:
     """Return True only when the user belongs to every configured public chat.
 
     A failed result is never cached: a user may have just joined and Telegram
@@ -47,39 +58,53 @@ async def check_user_membership(bot, user_id: int, *, force_refresh: bool = Fals
     now = time.monotonic()
     cached = _membership_cache.get(user_id)
     if not force_refresh and cached and now - cached[1] < MEMBERSHIP_CACHE_TTL:
-        return cached[0]
+        return (cached[0], []) if with_details else cached[0]
 
-    chats = [chat for chat in (CHANNEL_USERNAME, GROUP_USERNAME) if chat]
+    chats = [
+        ("RainOrdersGroup", CHANNEL_USERNAME),
+        ("RainStockGroup", GROUP_USERNAME),
+        ("RainWorld channel", ADDITIONAL_CHANNEL_CHAT_ID),
+    ]
+    chats = [(name, chat_id) for name, chat_id in chats if chat_id]
     if not chats:
         logger.warning("No valid public membership chat configured; allowing access")
-        return True
+        return (True, []) if with_details else True
 
-    async def check_chat(chat_username: str) -> bool:
-        for attempt in range(MEMBERSHIP_VERIFY_ATTEMPTS):
+    async def check_chat(name: str, chat_id: str | int) -> tuple[bool, str | None]:
+        attempts = 1 if fast else MEMBERSHIP_VERIFY_ATTEMPTS
+        timeout = 3 if fast else 5
+        for attempt in range(attempts):
             try:
                 # Check chats concurrently. A recently joined user is checked
                 # again briefly because Telegram membership updates can lag.
                 member = await asyncio.wait_for(
-                    bot.get_chat_member(chat_id=chat_username, user_id=user_id), timeout=5
+                    bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=timeout
                 )
                 if member.status not in ("left", "kicked"):
-                    return True
-            except Exception:
+                    return True, None
+                logger.info("Membership missing: user=%s chat=%s status=%s", user_id, name, member.status)
+                return False, name
+            except Exception as error:
                 # A temporary Telegram/API configuration failure must not lock users out.
-                logger.exception("Membership check failed for %s", chat_username)
-                return True
+                if "member list is inaccessible" in str(error).lower():
+                    logger.error("Bot cannot inspect membership for %s (%s); add it as an administrator", name, chat_id)
+                    return False, f"{name} (bot needs admin access)"
+                logger.exception("Membership check failed for %s (%s)", name, chat_id)
+                return True, None
 
-            if attempt < MEMBERSHIP_VERIFY_ATTEMPTS - 1:
+            if attempt < attempts - 1:
                 await asyncio.sleep(MEMBERSHIP_RETRY_DELAY_SECONDS)
 
-        return False
+        return False, name
 
-    is_member = all(await asyncio.gather(*(check_chat(chat) for chat in chats)))
+    results = await asyncio.gather(*(check_chat(name, chat_id) for name, chat_id in chats))
+    failures = [failure for _, failure in results if failure]
+    is_member = all(is_member for is_member, _ in results)
     if is_member and MEMBERSHIP_CACHE_TTL > 0:
         _membership_cache[user_id] = (is_member, now)
     else:
         _membership_cache.pop(user_id, None)
-    return is_member
+    return (is_member, failures) if with_details else is_member
 
 
 def get_join_keyboard() -> InlineKeyboardMarkup:
@@ -88,6 +113,8 @@ def get_join_keyboard() -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(text="📢 Join Channel", url=CHANNEL_LINK)])
     if GROUP_LINK and not GROUP_LINK.rstrip("/").split("/")[-1].startswith("+"):
         buttons.append([InlineKeyboardButton(text="👥 Join Group", url=GROUP_LINK)])
+    if ADDITIONAL_CHANNEL_LINK and not ADDITIONAL_CHANNEL_LINK.rstrip("/").split("/")[-1].startswith("+"):
+        buttons.append([InlineKeyboardButton(text="📣 Join RainWorld Channel", url=ADDITIONAL_CHANNEL_LINK)])
     buttons.append([InlineKeyboardButton(text="🔄 Try Again", callback_data="check_membership_retry")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -153,6 +180,8 @@ RESTRICTED_TEXT = (
     "You can still view your existing orders, support tickets, and deposits."
 )
 
+MAINTENANCE_TEXT = "🛠 <b>Rain Store is currently under maintenance.</b>\n\nPlease check back soon."
+
 
 def _is_banned_read_only_callback(callback_data: str | None) -> bool:
     return bool(callback_data) and callback_data.startswith(BANNED_READ_ONLY_CALLBACKS)
@@ -176,6 +205,23 @@ class BannedUserMiddleware(BaseMiddleware):
         # middleware receives the Message/CallbackQuery itself.
         actual_event = event.event if isinstance(event, Update) else event
         from_user = getattr(actual_event, "from_user", None)
+        if from_user and from_user.id not in ADMIN_IDS and await asyncio.to_thread(is_maintenance_enabled):
+            if isinstance(actual_event, CallbackQuery):
+                if actual_event.message:
+                    try:
+                        await actual_event.message.edit_text(MAINTENANCE_TEXT, parse_mode="HTML")
+                    except Exception:
+                        await actual_event.answer(MAINTENANCE_TEXT, show_alert=True)
+                else:
+                    await actual_event.answer(MAINTENANCE_TEXT, show_alert=True)
+            elif isinstance(actual_event, Message):
+                try:
+                    await actual_event.delete()
+                except Exception:
+                    pass
+                await actual_event.answer(MAINTENANCE_TEXT, parse_mode="HTML")
+            return None
+
         # SQLAlchemy/PyMySQL is synchronous. Never run it directly on the
         # asyncio event loop, otherwise one slow TiDB request freezes every
         # command and callback for all users.

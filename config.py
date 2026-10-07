@@ -26,6 +26,8 @@ ADMIN_IDS = [
 
 CHANNEL_LINK = "https://t.me/RainOrdersGroup"
 GROUP_LINK = "https://t.me/RainStockGroup"
+ADDITIONAL_CHANNEL_LINK = "https://t.me/rainworlddd"
+ADDITIONAL_CHANNEL_ID = -1003726039597
 TOS_LINK = "https://your-site.com/tos"
 
 GROUP_ID = -1003541834339

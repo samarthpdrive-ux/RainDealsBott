@@ -317,8 +317,10 @@ async def retry_membership_check(callback: CallbackQuery):
         callback.bot,
         callback.from_user.id,
         force_refresh=True,
+        with_details=True,
     )
 
+    is_member, failures = is_member
     if is_member:
         await callback.message.delete()
         await callback.message.answer(
@@ -329,7 +331,7 @@ async def retry_membership_check(callback: CallbackQuery):
         await callback.answer("✅ Verified! Send /start", show_alert=True)
     else:
         await callback.answer(
-            "❌ Membership is not active yet. Join every required chat, then try again.",
+            "❌ Could not verify: " + ", ".join(failures) + ". If joined, ask an admin to add the bot as an admin in that chat, then retry.",
             show_alert=True
         )
 
