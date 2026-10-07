@@ -39,6 +39,7 @@ from keyboards.menu import get_admin_main_menu
 
 from states.broadcast import BroadcastState
 from services.maintenance_mode import is_maintenance_enabled, set_maintenance_enabled
+from handlers.start import _build_start_welcome, _get_bot_username
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -1618,15 +1619,34 @@ async def send_broadcast(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_back")
 async def admin_back(callback: CallbackQuery, state: FSMContext):
-    """Replace the admin panel with the current lightweight start menu."""
-    await state.clear()
+    """Return the admin to the main menu with the current account summary."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Access denied.", show_alert=True)
+        return
 
-    await _safe_edit_text(
-        callback.message,
-        "<blockquote>🛍 <b>Welcome to Rain Store Bot!</b></blockquote>",
-        reply_markup=get_admin_main_menu(),
-        parse_mode="HTML",
-    )
+    await state.clear()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == callback.from_user.id).first()
+        if user:
+            bot_username = await _get_bot_username(callback.bot)
+            text = _build_start_welcome(
+                user,
+                callback.from_user.full_name,
+                callback.from_user.id,
+                callback.from_user.username,
+                bot_username,
+            )
+        else:
+            text = "<blockquote>🛍 <b>Welcome to Rain Store Bot!</b></blockquote>"
+        await _safe_edit_text(
+            callback.message,
+            text,
+            reply_markup=get_admin_main_menu(),
+            parse_mode="HTML",
+        )
+    finally:
+        db.close()
     await callback.answer()
 
 

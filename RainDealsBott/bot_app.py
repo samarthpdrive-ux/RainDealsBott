@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from config import BOT_TOKEN
 
@@ -26,6 +27,7 @@ from handlers.referral import router as referrals_router
 from handlers.support import router as support_router
 from handlers.user_promo import router as user_promo_router
 from handlers.api_keys import router as api_keys_router
+from handlers.commands import router as commands_router
 
 
 # ============================================================
@@ -85,6 +87,25 @@ dp = Dispatcher(
 )
 
 
+async def _register_bot_commands(bot: Bot):
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Open the home menu"),
+                BotCommand(command="shop", description="Browse the shop"),
+                BotCommand(command="wallet", description="View your wallet and balance"),
+                BotCommand(command="orders", description="View your orders"),
+                BotCommand(command="profile", description="View your profile"),
+            ],
+            scope=BotCommandScopeDefault(),
+        )
+    except Exception:
+        logger.exception("Could not register Telegram bot commands")
+
+
+dp.startup.register(_register_bot_commands)
+
+
 # ============================================================
 # GLOBAL BAN MIDDLEWARE
 # ============================================================
@@ -133,6 +154,10 @@ dp.include_router(
 
 dp.include_router(
     support_router
+)
+
+dp.include_router(
+    commands_router
 )
 
 

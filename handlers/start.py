@@ -26,6 +26,18 @@ from middleware.membership import check_user_membership, get_join_keyboard
 logger = logging.getLogger(__name__)
 
 router = Router()
+_bot_username: str | None = None
+_bot_username_lock = asyncio.Lock()
+
+
+async def _get_bot_username(bot) -> str:
+    global _bot_username
+    if not _bot_username:
+        async with _bot_username_lock:
+            if not _bot_username:
+                bot_info = await bot.get_me()
+                _bot_username = bot_info.username or ""
+    return _bot_username
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -176,9 +188,37 @@ def _build_audit_profile(user, telegram_id: int) -> str:
 # ║  MODERN /start BUILDER — TERMINAL STYLE                     ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-def _build_start_welcome(user, full_name: str) -> str:
-    """A single lightweight welcome card for the main menu."""
-    return "<blockquote>🛍 <b>Welcome to Rain Store Bot!</b></blockquote>"
+def _build_start_welcome(
+    user, full_name: str, telegram_id: int, username: str | None,
+    bot_username: str,
+) -> str:
+    balance = _format_balance(getattr(user, "balance_display", getattr(user, "balance", 0)))
+    spent = _format_balance(getattr(user, "total_spent_display", getattr(user, "total_spent", 0)) or 0)
+    earnings = _format_balance(
+        getattr(user, "referral_earnings_display", getattr(user, "referral_earnings", 0)) or 0
+    )
+    referral_count = int(getattr(user, "total_referrals", 0) or 0)
+    referral_code = str(getattr(user, "referral_code", "") or "").strip()
+    referral_url = f"https://t.me/{bot_username}?start=ref_{referral_code}" if bot_username and referral_code else ""
+    referral_link = f'<a href="{safe(referral_url)}">{safe(referral_url)}</a>' if referral_url else "Unavailable"
+    username_text = f"@{safe(username.lstrip('@'))}" if username else "Not set"
+    first_name = safe((full_name or "there").split()[0])
+    return (
+        "🛍 <b>RainDeals</b>\n"
+        "Quality digital products at great rates\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👋 Welcome back, <b>{first_name}</b>!\n"
+        f"🏷️ Username: {username_text}\n"
+        f"🆔 User ID: <code>{telegram_id}</code>\n"
+        "👑 Membership: 🥉 Bronze\n"
+        f"💰 Balance: ${balance}\n"
+        f"💎 Total Spent: ${spent}\n"
+        f"🤝 Referrals: {referral_count}\n"
+        f"💸 Referral Earnings: ${earnings}\n"
+        f"🔗 Referral Link: {referral_link}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Choose an option below to get started.</i>"
+    )
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -220,8 +260,12 @@ async def main_menu_cb(callback: CallbackQuery, state: FSMContext):
             await callback.answer("User not found.", show_alert=True)
             return
 
-        text = _build_start_welcome(user, callback.from_user.full_name)
         is_admin = callback.from_user.id in ADMIN_IDS
+        bot_username = await _get_bot_username(callback.bot)
+        text = _build_start_welcome(
+            user, callback.from_user.full_name, callback.from_user.id,
+            callback.from_user.username, bot_username,
+        )
         keyboard = get_admin_main_menu() if is_admin else get_main_menu()
 
         await show(callback, text, reply_markup=keyboard, parse_mode="HTML")
@@ -306,9 +350,10 @@ def _get_or_create_user(telegram_id: int, username: str, full_name: str, ref_pay
             referred_by = None
 
             if ref_payload:
+                referral_code = ref_payload.removeprefix("ref_")
                 referrer = (
                     db.query(User)
-                    .filter(User.referral_code == ref_payload)
+                    .filter(User.referral_code == referral_code)
                     .with_for_update()
                     .first()
                 )
@@ -348,6 +393,9 @@ def _get_or_create_user(telegram_id: int, username: str, full_name: str, ref_pay
                 "balance": user.balance,
                 "total_orders": user.total_orders,
                 "total_referrals": user.total_referrals,
+                "total_spent": user.total_spent,
+                "referral_earnings": user.referral_earnings,
+                "referral_code": user.referral_code,
             },
         }
 
@@ -411,7 +459,10 @@ async def start_cmd(message: Message, command: CommandObject):
         await product_info(message, deep_link_product_id)
         return
 
-    text = _build_start_welcome(user, full_name)
+    bot_username = await _get_bot_username(message.bot)
+    user.username = username
+    user.full_name = full_name
+    text = _build_start_welcome(user, full_name, telegram_id, username, bot_username)
     keyboard = get_admin_main_menu() if is_admin else get_main_menu()
     await message.answer(
         text, reply_markup=keyboard, parse_mode="HTML",

@@ -476,31 +476,8 @@ async def my_orders(callback: CallbackQuery):
     if not orders:
         await show(
             callback,
-            "📦 <b>YOUR ORDERS</b>\n📭 No orders yet.",
+            "📭 <b>No recent orders found.</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🛍 Browse Products",
-                            callback_data="products_menu",
-                            style="success"
-                        ),
-                        InlineKeyboardButton(
-                            text="💰 Deposit",
-                            callback_data="deposit_start",
-                            style="primary"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="⬅ Back to Menu",
-                            callback_data="main_menu",
-                            style="primary"
-                        )
-                    ]
-                ]
-            )
         )
         return
 
