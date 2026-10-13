@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -234,7 +235,9 @@ def _parse_form(body: bytes) -> dict[str, str]:
 
 
 def _telegram_login_url(challenge: str) -> str:
-    username = config.ADMIN_VERIFY_BOT_USERNAME
+    # Keep credential login available even if an older deployment is missing
+    # the optional verification-bot setting in its config module.
+    username = getattr(config, "ADMIN_VERIFY_BOT_USERNAME", "")
     if (not username or len(username) < 5 or len(username) > 32
             or not username[0].isalpha()
             or not all(char.isalnum() or char == "_" for char in username)):
