@@ -237,7 +237,11 @@ def _parse_form(body: bytes) -> dict[str, str]:
 def _telegram_login_url(challenge: str) -> str:
     # Keep credential login available even if an older deployment is missing
     # the optional verification-bot setting in its config module.
-    username = str(getattr(config, "ADMIN_VERIFY_BOT_USERNAME", "") or "").strip()
+    # This bot username is public. Keep it as a code fallback so the Render
+    # manager can build Telegram sign-in links without a separate env setting.
+    username = str(
+        getattr(config, "ADMIN_VERIFY_BOT_USERNAME", "") or "verificationoctabot"
+    ).strip()
     if "://" in username:
         username = urlsplit(username).path.strip("/").split("/", 1)[0]
     elif username.lower().startswith("t.me/"):
