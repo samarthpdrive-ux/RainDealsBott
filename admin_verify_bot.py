@@ -6,6 +6,7 @@ Run as its own worker with ADMIN_VERIFY_BOT_TOKEN configured.
 import asyncio
 import logging
 import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -19,6 +20,24 @@ from services.manager_auth import approve_login_challenge, create_challenge
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("admin_verify_bot")
 dp = Dispatcher()
+
+
+async def health(request: web.Request) -> web.Response:
+    return web.Response(text="Admin verification bot is running")
+
+
+async def start_http_server() -> web.AppRunner:
+    """Expose a health endpoint and bind Render's required web-service port."""
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/healthz", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("HTTP health server listening on port %s", port)
+    return runner
 
 
 async def _ensure_schema() -> None:
@@ -73,11 +92,14 @@ async def main() -> None:
         bot_token = str(getattr(config, "ADMIN_VERIFY_BOT_TOKEN", "") or "").strip()
     if not bot_token:
         raise RuntimeError("Set ADMIN_VERIFY_BOT_TOKEN for the dedicated manager verification bot.")
-    await _ensure_schema()
+    runner = await start_http_server()
     bot = Bot(token=bot_token)
     try:
+        await _ensure_schema()
+        await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         await bot.session.close()
 
 
