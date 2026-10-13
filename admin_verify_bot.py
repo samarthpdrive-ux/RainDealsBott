@@ -5,6 +5,7 @@ Run as its own worker with ADMIN_VERIFY_BOT_TOKEN configured.
 
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
@@ -65,10 +66,15 @@ async def generate_code(message: Message) -> None:
 
 
 async def main() -> None:
-    if not config.ADMIN_VERIFY_BOT_TOKEN:
+    # Read the Render worker's secret directly so the worker also works with
+    # older deployed config.py versions that do not expose this attribute.
+    bot_token = os.getenv("ADMIN_VERIFY_BOT_TOKEN", "").strip()
+    if not bot_token:
+        bot_token = str(getattr(config, "ADMIN_VERIFY_BOT_TOKEN", "") or "").strip()
+    if not bot_token:
         raise RuntimeError("Set ADMIN_VERIFY_BOT_TOKEN for the dedicated manager verification bot.")
     await _ensure_schema()
-    bot = Bot(token=config.ADMIN_VERIFY_BOT_TOKEN)
+    bot = Bot(token=bot_token)
     try:
         await dp.start_polling(bot)
     finally:
