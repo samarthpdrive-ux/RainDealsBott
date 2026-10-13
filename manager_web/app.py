@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from aiogram import Bot
 from fastapi import FastAPI, HTTPException, Request
@@ -237,7 +237,12 @@ def _parse_form(body: bytes) -> dict[str, str]:
 def _telegram_login_url(challenge: str) -> str:
     # Keep credential login available even if an older deployment is missing
     # the optional verification-bot setting in its config module.
-    username = getattr(config, "ADMIN_VERIFY_BOT_USERNAME", "")
+    username = str(getattr(config, "ADMIN_VERIFY_BOT_USERNAME", "") or "").strip()
+    if "://" in username:
+        username = urlsplit(username).path.strip("/").split("/", 1)[0]
+    elif username.lower().startswith("t.me/"):
+        username = username[5:].strip("/").split("/", 1)[0]
+    username = username.removeprefix("@").strip()
     if (not username or len(username) < 5 or len(username) > 32
             or not username[0].isalpha()
             or not all(char.isalnum() or char == "_" for char in username)):
@@ -298,7 +303,7 @@ def _login_page(error: str = "", csrf: str = "", stage: int = 1,
 }})();
 </script>'''
         else:
-            telegram_html = '<p class="status">Set ADMIN_VERIFY_BOT_USERNAME in the manager environment to enable the Telegram button.</p>'
+            telegram_html = '<p class="status">Telegram sign-in link unavailable. In the Render manager web service, set ADMIN_VERIFY_BOT_USERNAME to the verification bot username (for example, rain_verify_bot), then redeploy. Do not use the bot token in this field.</p>'
         form_html = f'''{telegram_html}
 <p>Fallback: send <strong>/generate</strong> to the verification bot in a private chat, then enter the code here.</p>
 <form method="post" action="/login"><input type="hidden" name="csrf" value="{escape(csrf)}"><input type="hidden" name="stage" value="verify">
